@@ -1,0 +1,15 @@
+# Ignore experiments
+experiments/
+
+# Ignore datasets
+datasets/
+
+# Ignore shell and job files 
+*.sh
+*.job
+
+# Ingore job output
+*.out
+
+# Ignore pycache
+**/__pycache__/
