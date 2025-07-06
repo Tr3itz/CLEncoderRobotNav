@@ -6,7 +6,7 @@ from torch.nn import functional as F
 from torchvision.transforms import v2
 
 # Contrastive imports
-from contrastive.datasets import InitDataset, Room1Dataset
+from contrastive.datasets import InitDataset, Room1Dataset, WithAugmentationsDataset
 from contrastive.encoder import ResNetEncoder
 from contrastive.components import SoftNearestNeighbor
 
@@ -418,6 +418,8 @@ def train(
 if __name__ == '__main__':
     print(f'{"-"*30}\nContrastive Scene Transfer Encoder training experiment!')
     
+    # TODO: adapt the script to the new dataset
+
     # Configurations
     conf = Configurations()
     args = conf.get_args()

@@ -400,3 +400,7 @@ class Room1Dataset(ContrastiveDataset):
             examples.append(self.transforms(ex_img))
 
         return torch.stack(examples)
+    
+class WithAugmentationsDataset(ContrastiveDataset):
+    # TODO: Create dataset object
+    pass
