@@ -183,7 +183,7 @@ def validate(
     bx.set_ylabel('Pearson Coefficient')
     bx.set_xticks([])
 
-    # Inter-scene consistency
+    ####################################### INTER-SCENE CONSISTENCY ############################################
     inter_embeddings = torch.cat(inter_embeddings, dim=0)
     augs_sim = F.cosine_similarity(inter_embeddings[:, 0, ...].unsqueeze(1), inter_embeddings[:, 1:, ...], dim=2)
     augs_sim = augs_sim.mean(dim=0)
@@ -192,8 +192,9 @@ def validate(
     cx.set_ylabel('Embedding Similarity')
     cx.boxplot(augs_sim, orientation='vertical')
     cx.set_xticks([])
+    #############################################################################################################
 
-    # Augmentations 2D t-SNE visualization
+    ############################# Augmentations 2D t-SNE visualization ################################
     dx = fig.add_subplot(3,2,5)
     dx.set_title('t-SNE Embedding Space (Augmentations)')
     dx.grid()
@@ -231,8 +232,9 @@ def validate(
         for i in aug_idx
     ]
     dx.legend(handles=handles)
+    ###################################################################################################
 
-    # Episodes 2D t-SNE visualization
+   ################################ Episodes 2D t-SNE visualization ###################################
     print('Episodes t-SNE visualization...')
     rgb_embeddings = TSNE(
         n_components=2,
@@ -241,13 +243,13 @@ def validate(
         init='random',
         random_state=42
     ).fit_transform(intra_embeddings)
-    # dx.scatter(rgb_embeddings[:,0], rgb_embeddings[:,1], label='Anchor')
 
     ex = fig.add_subplot(3,2,6)
     ex.set_title(f"t-SNE Embedding Space (Settings)")
     ex.scatter(rgb_embeddings[:,0], rgb_embeddings[:,1], c=inter_set, cmap='tab10')
     ex.set_xticks([])
     ex.set_yticks([])
+    ##################################################################################################
 
     # Save and close figure
     fig.savefig(f'{figs_dir}/epoch_{epoch + 1}.png', format='png')
@@ -389,8 +391,6 @@ def train(
 
 if __name__ == '__main__':
     print(f'{"-"*30}\nContrastive Scene Transfer Encoder training experiment!')
-    
-    # TODO: adapt the script to the new dataset
 
     # Configurations
     conf = Configurations()
