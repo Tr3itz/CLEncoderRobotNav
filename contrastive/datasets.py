@@ -10,6 +10,7 @@ import pickle
 import numpy as np
 import pandas as pd
 from PIL import Image
+from glob import glob
 from tqdm.auto import tqdm
 from typing import Iterable
 
@@ -64,28 +65,6 @@ class ContrastiveDataset(Dataset):
 
     def __len__(self):
         return self.annot_df.shape[0]
-    
-    def _load_examples(self, anc_idx: int, ex_idxs: Iterable, sim_scores_mat: np.array):
-        """
-        Load examples from self.annot_df given a list of indices.
-        """
-
-        examples = []
-        ex_sim_scores = []
-        for i in ex_idxs:
-            rec = self.annot_df.iloc[i]
-            ep = rec['episode']
-            step = rec['step']
-            dist = sim_scores_mat[anc_idx, i]
-            img = Image.open(f'{self.dir}/episode_{ep:04}/rgb_{step:05}.png')
-
-            examples.append(self.transforms(img))
-            ex_sim_scores.append(dist)
-
-        examples = torch.stack(examples)
-        ex_sim_scores = torch.tensor(ex_sim_scores, dtype=torch.float)
-
-        return examples, ex_sim_scores
     
     def _opposite_corner(self, x: int | float, y: int | float) -> tuple[int]:
         """
@@ -167,117 +146,30 @@ class ContrastiveDataset(Dataset):
         )
     
 
-class InitDataset(ContrastiveDataset):
-    def __init__(
-            self,
-            dir: str,
-            metric: str,
-            val_eps: list[int], 
-            n_neg:int, 
-            transforms: v2,
-            augmentations: list=None,
-            mode: str='train',
-            seed: int=42
-        ):
-        """
-        Torch implementation of Init dataset.
-        ----------
-        Parameters:
-        - dir: str            - directory of the dataset
-        - val_eps: int        - list of validation episodes
-        - metric: str         - metric for computing similarity (lidar, goal, both)
-        - n_neg: int          - number of negative examples
-        - transforms: v2      - image transformations to apply
-        - augmentations       - augmentations for positive examples
-        - seed: int           - random seed for reproducibility        
-        """
-
-        super().__init__(
-            dir=dir,
-            metric=metric,
-            transforms=transforms,
-            augmentations=augmentations,
-            mode=mode,
-            seed=seed
-        )
-
-        # Number of negative examples
-        self.n_neg = n_neg
-        
-        # Annotations
-        assert all(ep in self.annot_df['episode'].unique() for ep in val_eps)
-        val_df = self.annot_df[self.annot_df['episode'].map(lambda x: x in val_eps)]
-        if self.mode == 'train':
-            self.annot_df = self.annot_df.drop(val_df.index)
-        else:
-            self.annot_df = val_df.copy()
-        self.annot_df.reset_index(inplace=True, drop=True)
-        
-        # Initialize similarity matrix
-        self.sim_scores_mat = self._init_sim_matrix()
-        self.sim_scores_range = self.sim_scores_mat.max() - self.sim_scores_mat.min()
-
-    def __getitem__(self, idx: int):        
-        # Retrieve image location from the annotations dataframe 
-        record = self.annot_df.iloc[idx]
-        ep = record['episode']
-        step = record['step']
-            
-        # Load anchor image
-        img = Image.open(f'{self.dir}/episode_{ep:04}/rgb_{step:05}.png')
-        anchor = self.transforms(img)
-
-        # Augmentations of the anchor image
-        augs = [augm(img) for augm in self.augmentations]
-        pos_ex = torch.stack(augs)
-
-        if self.n_neg > 0:
-            # Add negative examples as the most dissimilar samples to the anchor
-            sim_scores = self.sim_scores_mat[idx]
-            neg_idxs = np.argsort(sim_scores)[:self.n_neg]
-            neg_ex, neg_sim_scores = self._load_examples(idx, neg_idxs, self.sim_scores_mat)
-
-            # Return sampled negative examples
-            return anchor, pos_ex, neg_ex, neg_sim_scores
-        else:
-            # Retrieve lidar readings
-            lidar = record['laser_readings']['scan'].squeeze()
-
-            # Compute the maximum possible distance to the goal of the observation
-            goal_x, goal_y = record['target_point_x'], record['target_point_y']
-            corner_x, corner_y = self._opposite_corner(goal_x, goal_y)
-            max_gd = np.sqrt((goal_x - corner_x)**2 + (goal_y - corner_y)**2)
-            
-            # Compute normalized goal distance
-            gd = np.sqrt((record['robot_pos_x'] - goal_x)**2 + (record['robot_pos_y'] - goal_y)**2) 
-            gd /= max_gd
-            
-            # Return additional information to the anchor for in-batch similarities
-            return anchor, pos_ex, lidar, gd
-
-
-class Room1Dataset(ContrastiveDataset):
+class WithAugmentationsDataset(ContrastiveDataset):
     def __init__(
             self,
             dir: str,
             metric: str,
             n_neg: int,
-            val_eps: list[int], 
+            neg_thresh: float,
+            val_room: int,
             transforms: v2,
             augmentations: list=None,
             mode: str='train',
             seed: int=42
         ):
         """
-        Torch implementation of Room1 dataset.
+        Torch implementation of with-augmentations dataset.
         ----------
         Parameters:
         - dir: str            - directory of the dataset
-        - metric: str         - metric for computing similarity (lidar, goal, both)
+        - metric: str         - metric for computing sample similarity (lidar, goal, both)
         - n_neg: int          - number of negative examples
-        - val_eps: list[int]  - validation episodes
+        - neg_thresh: int     - negative similarity threshold
+        - val_room: int       - validation room
         - transforms: v2      - image transformations to apply
-        - augmentations       - augmentations for positive examples
+        - augmentations       - additional augmentations for positive examples
         - seed: int           - random seed for reproducibility
         """
         super().__init__(
@@ -289,15 +181,23 @@ class Room1Dataset(ContrastiveDataset):
             seed=seed
         )
         
-        # Number of negative examples
+        # Negative examples
         self.n_neg = n_neg
+        self.neg_thresh = neg_thresh
 
         # Annotations
-        assert all(ep in self.annot_df['episode'].unique() for ep in val_eps)
+        assert val_room in self.annot_df['room'].unique()
+        val_sets = np.random.choice(self.annot_df['setting'].unique(), size=5)
         if self.mode == 'train':
-            self.annot_df = self.annot_df[self.annot_df['episode'].map(lambda x: x not in val_eps)]
+            self.annot_df = self.annot_df[
+                (self.annot_df['room'] != val_room) |
+                (self.annot_df['setting'].map(lambda x: x not in val_sets))
+            ]
         else:
-            self.annot_df = self.annot_df[self.annot_df['episode'].map(lambda x: x in val_eps)]
+            self.annot_df = self.annot_df[
+                (self.annot_df['room'] == val_room) &
+                (self.annot_df['setting'].map(lambda x: x in val_sets))
+            ]
         self.annot_df.reset_index(inplace=True, drop=True)
 
         # Initialize similarity matrix
@@ -308,16 +208,17 @@ class Room1Dataset(ContrastiveDataset):
     def __getitem__(self, idx: int):
         # Retrieve image location from the annotations dataframe 
         record = self.annot_df.iloc[idx]
+        R = record['room']
         S = record['setting']
         ep = record['episode']
         step = record['step']
         
         # Load anchor image
-        img = Image.open(f'{self.dir}/Setting{S}/episode_{ep:04}/rgb_{step:05}.png')
+        img = Image.open(f'{self.dir}/Room{R}/Setting{S}/episode_{ep:04}/rgb_{step:05}.png')
         anchor = self.transforms(img)
 
         # Augmentations of the anchor image
-        augs = [augm(img) for augm in self.augmentations]
+        augs = [augm(img) for augm in self.augmentations] + self._augs(record)
         pos_ex = torch.stack(augs)
         
         # Retrieve additional information for the anchor
@@ -326,6 +227,7 @@ class Room1Dataset(ContrastiveDataset):
         if self.n_neg > 0:
             # Load negative examples from the same setting of the room
             df = self.annot_df[
+                (self.annot_df['room'] == R) &
                 (self.annot_df['setting'] == S) &   
                 (self.annot_df['episode'] != ep)         
             ].copy()
@@ -338,8 +240,8 @@ class Room1Dataset(ContrastiveDataset):
                 lidar, gd = self._info(i)
                 sim_scores[i] *= self._sim(lidars=[anc_lidar, lidar], gds=[anc_gd, gd])
 
-            # Sample n_neg negative examples from all samples with score below 0.6 (includes hard negatives)
-            neg_recs = df[sim_scores < 0.6].sample(n=self.n_neg, random_state=self.seed)
+            # Sample n_neg negative examples from all samples with score below the threshold
+            neg_recs = df[sim_scores < self.neg_thresh].sample(n=self.n_neg, random_state=self.seed)
             neg_ex = self._load(neg_recs)
             neg_sim_scores = sim_scores[neg_recs.index]
 
@@ -351,7 +253,30 @@ class Room1Dataset(ContrastiveDataset):
         # Return additional information to the anchor for in-batch similarities
         return anchor, pos_ex, anc_lidar, anc_gd
     
+    def _augs(self, record: pd.Series) -> list[torch.Tensor]:
+        """
+        Retrieve in-dataset augmentations of an anchor image.
+        """
+        R = record['room']
+        S = record['setting']
+        ep = record['episode']
+        step = record['step']
+
+        # Paths to all augmentations
+        aug_paths = glob(f'{self.dir}/Room{R}/Setting{S}/episode_{ep:04}/augmented_results/*_rgb_{step:05}.png')
+
+        # Load augmented images
+        augs = []
+        for path in aug_paths:
+            img = Image.open(path)
+            augs.append(self.transforms(img))
+
+        return augs
+    
     def _info(self, idx: int=None, record: pd.Series=None) -> tuple:
+        """
+        Retrieve additional information.
+        """
         assert idx is not None or record is not None
 
         # Retrieve the record from the dataframe if needed        
@@ -373,6 +298,9 @@ class Room1Dataset(ContrastiveDataset):
         return lidar, gd
     
     def _sim(self, lidars: list, gds: list):
+        """
+        Measure sample similarity.
+        """
         assert len(lidars) == len(gds) == 2
 
         # Lidar normalized eucledian distances
@@ -389,8 +317,11 @@ class Room1Dataset(ContrastiveDataset):
             return (1 - lid_dist)*(1 - gd_diff)
         
     def _load(self, records: pd.DataFrame) -> torch.Tensor:
-        examples = []
+        """
+        Load examples from the dataset.
+        """
 
+        examples = []
         for _, rec in records.iterrows():
             rec_s = rec['setting']
             rec_ep = rec['episode']

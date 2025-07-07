@@ -6,7 +6,7 @@ from torch.nn import functional as F
 from torchvision.transforms import v2
 
 # Contrastive imports
-from contrastive.datasets import InitDataset, Room1Dataset
+from contrastive.datasets import WithAugmentationsDataset
 from contrastive.encoder import ResNetEncoder
 from contrastive.components import SoftNearestNeighbor
 
@@ -21,7 +21,7 @@ from datetime import datetime
 from configurations import Configurations
 
 
-def get_dataset(args) -> tuple[Room1Dataset]:
+def get_dataset(args) -> tuple[WithAugmentationsDataset]:
     transforms = v2.Compose([
         v2.ToImage(),
         v2.ToDtype(torch.uint8, scale=True),
@@ -42,57 +42,28 @@ def get_dataset(args) -> tuple[Room1Dataset]:
             v2.ColorJitter(brightness=(1.5,2.0)),
             v2.ToDtype(torch.float32, scale=True),
             v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ]),
-        v2.Compose([
-            v2.ToImage(),
-            v2.ToDtype(torch.uint8, scale=True),
-            v2.Resize([232,232]),
-            v2.CenterCrop([224,224]),
-            v2.ColorJitter(brightness=(2.5,3.0)),
-            v2.ToDtype(torch.float32, scale=True),
-            v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ]),
-        # Darker
-        v2.Compose([
-            v2.ToImage(),
-            v2.ToDtype(torch.uint8, scale=True),
-            v2.Resize([232,232]),
-            v2.CenterCrop([224,224]),
-            v2.ColorJitter(brightness=(0.7,0.9)),
-            v2.ToDtype(torch.float32, scale=True),
-            v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ]),
-        v2.Compose([
-            v2.ToImage(),
-            v2.ToDtype(torch.uint8, scale=True),
-            v2.Resize([232,232]),
-            v2.CenterCrop([224,224]),
-            v2.ColorJitter(brightness=(0.3,0.5)),
-            v2.ToDtype(torch.float32, scale=True),
-            v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])  
+        ]),  
     ]
-
-    # Validation episodes
-    val_eps = [args.val_eps] if isinstance(args.val_eps, int) else args.val_eps
     
     # Training dataset
-    train_dataset = Room1Dataset(
+    train_dataset = WithAugmentationsDataset(
         dir=f'{args.datasets_path}/{args.dataset}',
-        val_eps=val_eps,
+        val_room=args.val_room,
         metric=args.metric,
         n_neg=args.n_neg,
+        neg_thresh=args.neg_thresh,
         transforms=transforms,
         augmentations=augmentations,
         mode='train'
     )
 
     # Validation dataset
-    val_dataset = Room1Dataset(
+    val_dataset = WithAugmentationsDataset(
         dir=f'{args.datasets_path}/{args.dataset}',
-        val_eps=val_eps,
+        val_room=args.val_room,
         metric=args.metric,
         n_neg=args.n_neg,
+        neg_thresh=args.neg_thresh,
         transforms=transforms,
         augmentations=augmentations,
         mode='val'
@@ -104,7 +75,7 @@ def get_dataset(args) -> tuple[Room1Dataset]:
 def validate(
         args,
         model: nn.Module,
-        dataset: Room1Dataset,
+        dataset: WithAugmentationsDataset,
         loss_fn: SoftNearestNeighbor,
         figs_dir: str,
         epoch: int,
@@ -116,7 +87,7 @@ def validate(
     val_loss = 0
     intra_embeddings = []   # embeddings for intra-consistency analysis
     inter_embeddings = []   # embeddings for inter-consistency analysis
-    inter_set = []          # episodes included in embeddings observations 
+    inter_set = []          # settings included in embeddings observations 
     model.eval()
     with torch.no_grad():
         for batch, data in enumerate(tqdm(data_loader, unit='imgs', total= len(data_loader), leave=True)):            
@@ -151,7 +122,7 @@ def validate(
 
             # For inter-scene consistency analysis take anchors and augmentations embeddings
             ancs = anc_embeddings.unsqueeze(1).cpu()
-            augs = pos_embeddings[:, :len(dataset.augmentations), ...].cpu() # Take augmentations out of positive examples for inter-scene consistency
+            augs = pos_embeddings.cpu() # Take augmentations out of positive examples for inter-scene consistency
             embeddings = torch.cat([ancs, augs], dim=1)
             inter_embeddings.append(embeddings)
             for idx in range(0, args.batch_size):
@@ -165,7 +136,7 @@ def validate(
     val_loss /= len(data_loader)
     print(f'End of VALIDATION - Avg Soft Nearest Neighbor Loss: {val_loss:.5f}')
 
-    # INTRA-SCENE CONSISTENCY
+    ############################## INTRA-SCENE CONSISTENCY ###################################
     bins = [[] for _ in range(n_bins)]
     bin_tol = dataset.sim_scores_range / n_bins
     intra_embeddings = torch.cat(intra_embeddings, dim=0)
@@ -189,9 +160,7 @@ def validate(
 
         # Measure the correlation between sample and embedding similarities
         corrs.append(np.corrcoef(x=sorted_scores, y=embedding_sims.numpy())[0, 1])
-
-    # Prepare for intere-scene consistency analysis
-    inter_embeddings = torch.cat(inter_embeddings, dim=0)
+    ##########################################################################################  
 
     # PLOTTING
     fig = plt.figure(figsize=[25,30])
@@ -214,7 +183,8 @@ def validate(
     bx.set_ylabel('Pearson Coefficient')
     bx.set_xticks([])
 
-    # INTER-SCENE CONSISTENCY
+    # Inter-scene consistency
+    inter_embeddings = torch.cat(inter_embeddings, dim=0)
     augs_sim = F.cosine_similarity(inter_embeddings[:, 0, ...].unsqueeze(1), inter_embeddings[:, 1:, ...], dim=2)
     augs_sim = augs_sim.mean(dim=0)
     cx = fig.add_subplot(3,2,4)
@@ -256,7 +226,7 @@ def validate(
     
     # Create a legend manually
     handles = [
-        plt.Line2D([0], [0], marker='o', color='w', label=f'Augmentation {i}',
+        plt.Line2D([0], [0], marker='o', color='w', label='Anchor' if i == 0 else f'Augmentation {i}',
                    markerfacecolor=idx_to_color[i], markersize=8)
         for i in aug_idx
     ]
@@ -271,13 +241,13 @@ def validate(
         init='random',
         random_state=42
     ).fit_transform(intra_embeddings)
+    # dx.scatter(rgb_embeddings[:,0], rgb_embeddings[:,1], label='Anchor')
 
-    dx.scatter(rgb_embeddings[:,0], rgb_embeddings[:,1], label='Anchor')
-    cx = fig.add_subplot(3,2,6)
-    cx.set_title(f"t-SNE Embedding Space")
-    cx.scatter(rgb_embeddings[:,0], rgb_embeddings[:,1], c=inter_set, cmap='tab10')
-    cx.set_xticks([])
-    cx.set_yticks([])
+    ex = fig.add_subplot(3,2,6)
+    ex.set_title(f"t-SNE Embedding Space (Settings)")
+    ex.scatter(rgb_embeddings[:,0], rgb_embeddings[:,1], c=inter_set, cmap='tab10')
+    ex.set_xticks([])
+    ex.set_yticks([])
 
     # Save and close figure
     fig.savefig(f'{figs_dir}/epoch_{epoch + 1}.png', format='png')
@@ -289,14 +259,16 @@ def validate(
 def train(
         args,
         model: nn.Module,
-        train_dataset: Room1Dataset,
-        val_dataset: Room1Dataset,
+        train_dataset: WithAugmentationsDataset,
+        val_dataset: WithAugmentationsDataset,
         loss_fn: nn.Module,
         optimizer: optim.Optimizer,
         exp_dir: str,
         figs_dir: str,
         lr_scheduler: optim.lr_scheduler.LRScheduler | str='manual',
 ):
+    # Experiments seed
+    np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
 
@@ -418,6 +390,8 @@ def train(
 if __name__ == '__main__':
     print(f'{"-"*30}\nContrastive Scene Transfer Encoder training experiment!')
     
+    # TODO: adapt the script to the new dataset
+
     # Configurations
     conf = Configurations()
     args = conf.get_args()
