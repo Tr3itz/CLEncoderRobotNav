@@ -56,15 +56,25 @@ class ContrastiveDataset(Dataset):
         self.metric = metric
 
         # Annotations dataframe
-        assert os.path.exists(f'{dir}/annotations.pkl')
-        with open(f'{dir}/annotations.pkl', 'rb') as f:
-            self.annot_df = pickle.load(f)
+        assert os.path.exists(self.dir)
+        try:
+            with open(f'{self.dir}/annotations.pkl', 'rb') as f:
+                self.annot_df = pickle.load(f)
+        except FileNotFoundError:
+            print(f'Creating annotations file...')
+            self.annot_df = self._annot()
 
         # Pandas methods will be used on this dataframe
         assert isinstance(self.annot_df, pd.DataFrame)
 
     def __len__(self):
         return self.annot_df.shape[0]
+    
+    def _annot(self):
+        """
+        Create a global annotations file of the dataset.
+        """
+        pass
     
     def _opposite_corner(self, x: int | float, y: int | float) -> tuple[int]:
         """
@@ -252,6 +262,40 @@ class WithAugmentationsDataset(ContrastiveDataset):
 
         # Return additional information to the anchor for in-batch similarities
         return anchor, pos_ex, anc_lidar, anc_gd
+    
+    def _annot(self):
+        """
+        Create a global annotations file of the dataset.
+        """
+        # Filter warnings
+        import warnings
+        warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+        # Create a global annotations file
+        annot_df = []
+        for room in range(1, len(glob(f'{self.dir}/*'))+1):
+            room_dir = f'{self.dir}/Room{room}'
+
+            for setting in range(1, len(glob(f'{room_dir}/*'))+1):
+                set_dir = f'{room_dir}/Setting{setting}'
+                for ep_dir in sorted(glob(f'{set_dir}/episode_*')):     
+
+                    ep = ep_dir.split('/')[-1]
+                    try:
+                        with open(f'{ep_dir}/{ep}.pkl', 'rb') as f:
+                            df = pickle.load(f)
+                            df.insert(0, 'setting', np.ones(df.shape[0], dtype=int) * setting)
+                            df.insert(0, 'room', np.ones(df.shape[0], dtype=int) * room)
+                            annot_df.append(df)
+                    except FileNotFoundError:
+                        print(f'File not found: {ep_dir}/{ep}.pkl')
+
+        annot_df = pd.concat(annot_df)
+        annot_df.index = list(range(0, annot_df.shape[0]))
+
+        annot_df.to_pickle(f'{self.dir}/annotations.pkl')
+
+        return annot_df
     
     def _augs(self, record: pd.Series) -> list[torch.Tensor]:
         """
