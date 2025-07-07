@@ -13,7 +13,7 @@ class Configurations:
 
         # Dataset settings
         self.parser.add_argument('--datasets_path', type=str, required=True, help="Path to the datasets folder")
-        self.parser.add_argument('--dataset', type=str, default='init', choices=['init', 'Room1'], help="Dataset to use for training")
+        self.parser.add_argument('--dataset', type=str, default='with-augmentations', help="Dataset to use for training")
         self.parser.add_argument('--val_eps', type=int, nargs='+', default=2, help="Validation episodes")
         self.parser.add_argument('--metric', type=str, default='lidar', choices=['lidar', 'goal', 'both'], help="Metric for denoting similarity")
         self.parser.add_argument('--n_neg', type=int, default=0, help="Number of negative examples to sample per anchor during training")
