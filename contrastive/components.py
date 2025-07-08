@@ -26,28 +26,35 @@ class SoftNearestNeighbor(nn.Module):
     def __call__(
             self,
             anc_batch: torch.Tensor, 
-            pos_batch: torch.Tensor, 
+            pos_batch: torch.Tensor,
+            pos_sim_scores: torch.Tensor, 
             lidars: torch.Tensor=None, 
             gds: torch.Tensor=None, 
             neg_batch: torch.Tensor=None, 
             neg_sim_scores: torch.Tensor=None
         ):
         """
-        New implementation uses distances (1 - sample_sim) as temperatures:
+        New implementation maps similarities/distances in [tau_min, tau_max]:
 
-            tau(i,j) = tau_min + (tau_max-tau_min) * d_ij/d_max
+                tau(i,j) = tau_min + (tau_max-tau_min) * d_ij/d_max
+        ----------
+        IMPORTANT:
+        - positive examples use distances as adaptive temperatures 
+          (the closer the sample, the higher the numerator)
+        - negative examples use similarities as adaptive temperatures 
+          (the more similar, the less impact on the denominator) 
         """ 
 
         # Embedding similarities between anchors and positive examples
         pos_sims = F.cosine_similarity(anc_batch.unsqueeze(1), pos_batch, dim=-1)
-        pos_tau = self.tau_min
+        pos_tau = self.tau_min + (self.tau_max - self.tau_min) * (1-pos_sim_scores)
         pos_sims = torch.exp(pos_sims / pos_tau)  # removed '-' in front of similarity
 
         if neg_batch is not None:
             # Embedding similarities between anchors and positive examples
             neg_sims = F.cosine_similarity(anc_batch.unsqueeze(1), neg_batch, dim=-1)
             # Adaptive temperatures
-            neg_tau = self.tau_min + (self.tau_max - self.tau_min)*(neg_sim_scores / self.tau_max)
+            neg_tau = self.tau_min + (self.tau_max - self.tau_min) * neg_sim_scores
             neg_sims = torch.exp(neg_sims / neg_tau)  # removed '-' in front of similarity
 
             # Compute SNN loss with sampled negative examples
