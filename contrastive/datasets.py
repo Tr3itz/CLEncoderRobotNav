@@ -400,11 +400,12 @@ class WithAugmentationsDataset(ContrastiveDataset):
 
         examples = []
         for _, rec in records.iterrows():
+            rec_r = rec['room']
             rec_s = rec['setting']
             rec_ep = rec['episode']
             rec_step = rec['step']
 
-            ex_img = Image.open(f'{self.dir}/Setting{rec_s}/episode_{rec_ep:04}/rgb_{rec_step:05}.png')
+            ex_img = Image.open(f'{self.dir}/Room{rec_r}/Setting{rec_s}/episode_{rec_ep:04}/rgb_{rec_step:05}.png')
             examples.append(self.transforms(ex_img))
 
         return torch.stack(examples)
