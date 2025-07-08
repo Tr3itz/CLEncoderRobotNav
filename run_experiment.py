@@ -94,14 +94,14 @@ def validate(
             
             # Move data to the target device
             if args.n_neg > 0:
-                anchors, pos_ex, neg_ex, neg_sim_scores = data
+                anchors, pos_ex, pos_sim_scores, neg_ex, neg_sim_scores = data
                 anchors = anchors.to(device)
-                pos_ex = pos_ex.to(device)
+                pos_ex, pos_sim_scores = pos_ex.to(device), pos_sim_scores.to(device)
                 neg_ex, neg_sim_scores = neg_ex.to(device), neg_sim_scores.to(device)       
             else:
-                anchors, pos_ex, lidars, gds = data
+                anchors, pos_ex, pos_sim_scores, lidars, gds = data
                 anchors = anchors.to(device)
-                pos_ex = pos_ex.to(device)
+                pos_ex, pos_sim_scores = pos_ex.to(device), pos_sim_scores.to(device)
                 lidars, gds = lidars.to(device), gds.to(device)
             
             # Generate embeddings
@@ -112,10 +112,10 @@ def validate(
                 # Generate embeddings of negative examples
                 neg_embeddings = model(neg_ex)
                 # Adaptive Contrastive Loss
-                val_loss += loss_fn(anc_embeddings, pos_embeddings, neg_batch=neg_embeddings, neg_sim_scores=neg_sim_scores).detach().item()
+                val_loss += loss_fn(anc_embeddings, pos_embeddings, pos_sim_scores, neg_batch=neg_embeddings, neg_sim_scores=neg_sim_scores).detach().item()
             else:
                 # Adaptive Contrastive Loss
-                val_loss += loss_fn(anc_embeddings, pos_embeddings, lidars=lidars, gds=gds).detach().item()
+                val_loss += loss_fn(anc_embeddings, pos_embeddings, pos_sim_scores, lidars=lidars, gds=gds).detach().item()
             
             # For intra-consistency analysis just take anchor embeddings
             intra_embeddings.append(anc_embeddings.cpu()) 
@@ -299,14 +299,14 @@ def train(
 
             # Move data to the target device
             if args.n_neg > 0:
-                anchors, pos_ex, neg_ex, neg_sim_scores = data
+                anchors, pos_ex, pos_sim_scores, neg_ex, neg_sim_scores = data
                 anchors = anchors.to(device)
-                pos_ex = pos_ex.to(device)
+                pos_ex, pos_sim_scores = pos_ex.to(device), pos_sim_scores.to(device)
                 neg_ex, neg_sim_scores = neg_ex.to(device), neg_sim_scores.to(device)       
             else:
-                anchors, pos_ex, lidars, gds = data
+                anchors, pos_ex, pos_sim_scores, lidars, gds = data
                 anchors = anchors.to(device)
-                pos_ex = pos_ex.to(device)
+                pos_ex, pos_sim_scores = pos_ex.to(device), pos_sim_scores.to(device)
                 lidars, gds = lidars.to(device), gds.to(device)
 
             # Generate embeddings
@@ -317,10 +317,10 @@ def train(
                 # Generate embeddings of negative examples
                 neg_embeddings = model(neg_ex)
                 # Adaptive Contrastive Loss
-                loss = loss_fn(anc_embeddings, pos_embeddings, neg_batch=neg_embeddings, neg_sim_scores=neg_sim_scores)
+                loss = loss_fn(anc_embeddings, pos_embeddings, pos_sim_scores, neg_batch=neg_embeddings, neg_sim_scores=neg_sim_scores)
             else:
                 # Adaptive Contrastive Loss
-                loss = loss_fn(anc_embeddings, pos_embeddings, lidars=lidars, gds=gds)
+                loss = loss_fn(anc_embeddings, pos_embeddings, pos_sim_scores, lidars=lidars, gds=gds)
 
             # Backpropagation
             optimizer.zero_grad()
