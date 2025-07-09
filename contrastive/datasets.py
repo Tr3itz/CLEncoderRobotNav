@@ -161,6 +161,8 @@ class WithAugmentationsDataset(ContrastiveDataset):
             self,
             dir: str,
             metric: str,
+            n_pos: int,
+            pos_thresh: float,
             n_neg: int,
             neg_thresh: float,
             val_room: int,
@@ -175,8 +177,10 @@ class WithAugmentationsDataset(ContrastiveDataset):
         Parameters:
         - dir: str            - directory of the dataset
         - metric: str         - metric for computing sample similarity (lidar, goal, both)
+        - n_pos: int          - number of positive examples
+        - pos_thresh: float   - positive similarity threshold
         - n_neg: int          - number of negative examples
-        - neg_thresh: int     - negative similarity threshold
+        - neg_thresh: float   - negative similarity threshold
         - val_room: int       - validation room
         - transforms: v2      - image transformations to apply
         - augmentations       - additional augmentations for positive examples
@@ -190,6 +194,10 @@ class WithAugmentationsDataset(ContrastiveDataset):
             mode=mode,
             seed=seed
         )
+
+        # Positive examples
+        self.n_pos = n_pos
+        self.pos_thresh = pos_thresh
         
         # Negative examples
         self.n_neg = n_neg
@@ -230,9 +238,34 @@ class WithAugmentationsDataset(ContrastiveDataset):
         # Augmentations of the anchor image
         augs = [augm(img) for augm in self.augmentations] + self._augs(record)
         pos_ex = torch.stack(augs)
+        pos_sim_scores = np.ones(shape=(pos_ex.shape[0],))
         
         # Retrieve additional information for the anchor
-        anc_lidar, anc_gd = self._info(record=record)           
+        anc_lidar, anc_gd = self._info(record=record)
+
+        if self.n_pos > 0:
+            # Load positive examples from any other episode
+            df = self.annot_df[
+                (self.annot_df['room'] != R) |
+                (self.annot_df['setting'] != S) |   
+                (self.annot_df['episode'] != ep)         
+            ].copy()
+            df.reset_index(inplace=True, drop=True)
+
+            # Similarity scores
+            sim_scores = np.ones(shape=(df.shape[0],))          
+
+            for i in df.index:
+                lidar, gd = self._info(i)
+                sim_scores[i] *= self._sim(lidars=[anc_lidar, lidar], gds=[anc_gd, gd])
+
+            # Sample n_pos negative examples from all samples with score above the threshold
+            pos_recs = df[sim_scores >= self.pos_thresh].sample(n=self.n_pos, random_state=self.seed)
+            pos_ex = torch.cat([pos_ex, self._load(pos_recs)])
+            pos_sim_scores = np.concat([pos_sim_scores, sim_scores[pos_recs.index]])
+
+            # Free space
+            del df, sim_scores           
         
         if self.n_neg > 0:
             # Load negative examples from the same setting of the room
@@ -251,17 +284,17 @@ class WithAugmentationsDataset(ContrastiveDataset):
                 sim_scores[i] *= self._sim(lidars=[anc_lidar, lidar], gds=[anc_gd, gd])
 
             # Sample n_neg negative examples from all samples with score below the threshold
-            neg_recs = df[sim_scores < self.neg_thresh].sample(n=self.n_neg, random_state=self.seed)
+            neg_recs = df[sim_scores <= self.neg_thresh].sample(n=self.n_neg, random_state=self.seed)
             neg_ex = self._load(neg_recs)
             neg_sim_scores = sim_scores[neg_recs.index]
 
             # Free space
             del df, sim_scores
 
-            return anchor, pos_ex, neg_ex, neg_sim_scores
+            return anchor, pos_ex, pos_sim_scores, neg_ex, neg_sim_scores
 
         # Return additional information to the anchor for in-batch similarities
-        return anchor, pos_ex, anc_lidar, anc_gd
+        return anchor, pos_ex, pos_sim_scores, anc_lidar, anc_gd
     
     def _annot(self):
         """
@@ -367,11 +400,12 @@ class WithAugmentationsDataset(ContrastiveDataset):
 
         examples = []
         for _, rec in records.iterrows():
+            rec_r = rec['room']
             rec_s = rec['setting']
             rec_ep = rec['episode']
             rec_step = rec['step']
 
-            ex_img = Image.open(f'{self.dir}/Setting{rec_s}/episode_{rec_ep:04}/rgb_{rec_step:05}.png')
+            ex_img = Image.open(f'{self.dir}/Room{rec_r}/Setting{rec_s}/episode_{rec_ep:04}/rgb_{rec_step:05}.png')
             examples.append(self.transforms(ex_img))
 
         return torch.stack(examples)

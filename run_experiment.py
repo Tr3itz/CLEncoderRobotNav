@@ -50,6 +50,8 @@ def get_dataset(args) -> tuple[WithAugmentationsDataset]:
         dir=f'{args.datasets_path}/{args.dataset}',
         val_room=args.val_room,
         metric=args.metric,
+        n_pos=args.n_pos,
+        pos_thresh=args.pos_thresh,
         n_neg=args.n_neg,
         neg_thresh=args.neg_thresh,
         transforms=transforms,
@@ -62,6 +64,8 @@ def get_dataset(args) -> tuple[WithAugmentationsDataset]:
         dir=f'{args.datasets_path}/{args.dataset}',
         val_room=args.val_room,
         metric=args.metric,
+        n_pos=args.n_pos,
+        pos_thresh=args.pos_thresh,
         n_neg=args.n_neg,
         neg_thresh=args.neg_thresh,
         transforms=transforms,
@@ -94,14 +98,14 @@ def validate(
             
             # Move data to the target device
             if args.n_neg > 0:
-                anchors, pos_ex, neg_ex, neg_sim_scores = data
+                anchors, pos_ex, pos_sim_scores, neg_ex, neg_sim_scores = data
                 anchors = anchors.to(device)
-                pos_ex = pos_ex.to(device)
+                pos_ex, pos_sim_scores = pos_ex.to(device), pos_sim_scores.to(device)
                 neg_ex, neg_sim_scores = neg_ex.to(device), neg_sim_scores.to(device)       
             else:
-                anchors, pos_ex, lidars, gds = data
+                anchors, pos_ex, pos_sim_scores, lidars, gds = data
                 anchors = anchors.to(device)
-                pos_ex = pos_ex.to(device)
+                pos_ex, pos_sim_scores = pos_ex.to(device), pos_sim_scores.to(device)
                 lidars, gds = lidars.to(device), gds.to(device)
             
             # Generate embeddings
@@ -112,17 +116,17 @@ def validate(
                 # Generate embeddings of negative examples
                 neg_embeddings = model(neg_ex)
                 # Adaptive Contrastive Loss
-                val_loss += loss_fn(anc_embeddings, pos_embeddings, neg_batch=neg_embeddings, neg_sim_scores=neg_sim_scores).detach().item()
+                val_loss += loss_fn(anc_embeddings, pos_embeddings, pos_sim_scores, neg_batch=neg_embeddings, neg_sim_scores=neg_sim_scores).detach().item()
             else:
                 # Adaptive Contrastive Loss
-                val_loss += loss_fn(anc_embeddings, pos_embeddings, lidars=lidars, gds=gds).detach().item()
+                val_loss += loss_fn(anc_embeddings, pos_embeddings, pos_sim_scores, lidars=lidars, gds=gds).detach().item()
             
             # For intra-consistency analysis just take anchor embeddings
             intra_embeddings.append(anc_embeddings.cpu()) 
 
             # For inter-scene consistency analysis take anchors and augmentations embeddings
             ancs = anc_embeddings.unsqueeze(1).cpu()
-            augs = pos_embeddings.cpu() # Take augmentations out of positive examples for inter-scene consistency
+            augs = pos_embeddings[:, :-args.n_pos, ...].cpu() if args.n_pos > 0 else pos_embeddings.cpu()
             embeddings = torch.cat([ancs, augs], dim=1)
             inter_embeddings.append(embeddings)
             for idx in range(0, args.batch_size):
@@ -135,6 +139,11 @@ def validate(
             
     val_loss /= len(data_loader)
     print(f'End of VALIDATION - Avg Soft Nearest Neighbor Loss: {val_loss:.5f}')
+
+    # PLOTTING
+    fig = plt.figure(figsize=[25,30])
+    plt.axis('off')
+    fig.suptitle(f'Validation epoch {epoch + 1}')
 
     ############################## INTRA-SCENE CONSISTENCY ###################################
     bins = [[] for _ in range(n_bins)]
@@ -160,14 +169,8 @@ def validate(
 
         # Measure the correlation between sample and embedding similarities
         corrs.append(np.corrcoef(x=sorted_scores, y=embedding_sims.numpy())[0, 1])
-    ##########################################################################################  
 
-    # PLOTTING
-    fig = plt.figure(figsize=[25,30])
-    plt.axis('off')
-    fig.suptitle(f'Validation epoch {epoch + 1}')
-
-    # Intra-scene consistency
+    # Intra-scene consistency plot
     ax = fig.add_subplot(3,1,1) 
     xticks = [f'{(1.0-(i-1)*bin_tol):.2f}-{(1.0-i*bin_tol):.2f}' for i in range(1, n_bins+1)]
     ax.set_title(f'Intra-scene Consistency (metric={dataset.metric})')
@@ -176,12 +179,13 @@ def validate(
     ax.set_ylabel('Embedding Similarity')
     ax.set_xlabel('Sample similarity')
 
-    # Similarities correlation
+    # Similarities correlation plot
     bx = fig.add_subplot(3,2,3)
     bx.set_title(f'Similarities Correlation')
     bx.boxplot(corrs, orientation='vertical')
     bx.set_ylabel('Pearson Coefficient')
     bx.set_xticks([])
+    ##########################################################################################  
 
     ####################################### INTER-SCENE CONSISTENCY ############################################
     inter_embeddings = torch.cat(inter_embeddings, dim=0)
@@ -299,14 +303,14 @@ def train(
 
             # Move data to the target device
             if args.n_neg > 0:
-                anchors, pos_ex, neg_ex, neg_sim_scores = data
+                anchors, pos_ex, pos_sim_scores, neg_ex, neg_sim_scores = data
                 anchors = anchors.to(device)
-                pos_ex = pos_ex.to(device)
+                pos_ex, pos_sim_scores = pos_ex.to(device), pos_sim_scores.to(device)
                 neg_ex, neg_sim_scores = neg_ex.to(device), neg_sim_scores.to(device)       
             else:
-                anchors, pos_ex, lidars, gds = data
+                anchors, pos_ex, pos_sim_scores, lidars, gds = data
                 anchors = anchors.to(device)
-                pos_ex = pos_ex.to(device)
+                pos_ex, pos_sim_scores = pos_ex.to(device), pos_sim_scores.to(device)
                 lidars, gds = lidars.to(device), gds.to(device)
 
             # Generate embeddings
@@ -317,10 +321,10 @@ def train(
                 # Generate embeddings of negative examples
                 neg_embeddings = model(neg_ex)
                 # Adaptive Contrastive Loss
-                loss = loss_fn(anc_embeddings, pos_embeddings, neg_batch=neg_embeddings, neg_sim_scores=neg_sim_scores)
+                loss = loss_fn(anc_embeddings, pos_embeddings, pos_sim_scores, neg_batch=neg_embeddings, neg_sim_scores=neg_sim_scores)
             else:
                 # Adaptive Contrastive Loss
-                loss = loss_fn(anc_embeddings, pos_embeddings, lidars=lidars, gds=gds)
+                loss = loss_fn(anc_embeddings, pos_embeddings, pos_sim_scores, lidars=lidars, gds=gds)
 
             # Backpropagation
             optimizer.zero_grad()
