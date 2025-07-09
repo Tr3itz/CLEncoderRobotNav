@@ -126,7 +126,7 @@ def validate(
 
             # For inter-scene consistency analysis take anchors and augmentations embeddings
             ancs = anc_embeddings.unsqueeze(1).cpu()
-            augs = pos_embeddings.cpu() # Take augmentations out of positive examples for inter-scene consistency
+            augs = pos_embeddings[:, :-args.n_pos, ...].cpu() if args.n_pos > 0 else pos_embeddings.cpu()
             embeddings = torch.cat([ancs, augs], dim=1)
             inter_embeddings.append(embeddings)
             for idx in range(0, args.batch_size):
@@ -139,6 +139,11 @@ def validate(
             
     val_loss /= len(data_loader)
     print(f'End of VALIDATION - Avg Soft Nearest Neighbor Loss: {val_loss:.5f}')
+
+    # PLOTTING
+    fig = plt.figure(figsize=[25,30])
+    plt.axis('off')
+    fig.suptitle(f'Validation epoch {epoch + 1}')
 
     ############################## INTRA-SCENE CONSISTENCY ###################################
     bins = [[] for _ in range(n_bins)]
@@ -164,14 +169,8 @@ def validate(
 
         # Measure the correlation between sample and embedding similarities
         corrs.append(np.corrcoef(x=sorted_scores, y=embedding_sims.numpy())[0, 1])
-    ##########################################################################################  
 
-    # PLOTTING
-    fig = plt.figure(figsize=[25,30])
-    plt.axis('off')
-    fig.suptitle(f'Validation epoch {epoch + 1}')
-
-    # Intra-scene consistency
+    # Intra-scene consistency plot
     ax = fig.add_subplot(3,1,1) 
     xticks = [f'{(1.0-(i-1)*bin_tol):.2f}-{(1.0-i*bin_tol):.2f}' for i in range(1, n_bins+1)]
     ax.set_title(f'Intra-scene Consistency (metric={dataset.metric})')
@@ -180,12 +179,13 @@ def validate(
     ax.set_ylabel('Embedding Similarity')
     ax.set_xlabel('Sample similarity')
 
-    # Similarities correlation
+    # Similarities correlation plot
     bx = fig.add_subplot(3,2,3)
     bx.set_title(f'Similarities Correlation')
     bx.boxplot(corrs, orientation='vertical')
     bx.set_ylabel('Pearson Coefficient')
     bx.set_xticks([])
+    ##########################################################################################  
 
     ####################################### INTER-SCENE CONSISTENCY ############################################
     inter_embeddings = torch.cat(inter_embeddings, dim=0)
