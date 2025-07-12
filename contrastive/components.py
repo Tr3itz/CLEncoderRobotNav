@@ -1,11 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from math import sqrt
 
 
 class SoftNearestNeighbor(nn.Module):
-    def __init__(self, metric:str, tau_min: float=0.1, tau_max: float=1.0):
+    def __init__(self, args, tau_min: float=0.1, tau_max: float=1.0):
         """
         Adaptive contrastive learning objective implementation.
         ----------
@@ -17,8 +16,10 @@ class SoftNearestNeighbor(nn.Module):
         super().__init__()
 
         # Metric
-        assert metric in ['lidar', 'goal', 'both']
-        self.metric = metric
+        self.metric = args.metric
+        if self.metric in ['lidar', 'both']:
+            self.mask = args.mask
+            self.shift = args.shift
 
         # Temperatures range
         self.tau_min, self.tau_max = tau_min, tau_max
@@ -73,11 +74,34 @@ class SoftNearestNeighbor(nn.Module):
         """
         Compute in-batch negatives for anchors.
         """
+        if not hasattr(self, 'mask_w'):
+            # Define LiDAR readings mask
+            w = torch.zeros(size=(lidars.shape[1],))
+            match self.mask:
+                case 'naive':
+                    w += 1
+                case 'binary':
+                    # In FOV readings
+                    w[64:164] += 1
+                case 'soft':
+                    # In FOV readings
+                    w[64:164] += 1
+                    # Out of FOV readings
+                    x = torch.linspace(0.0, 1.0, w[164:].shape[0])
+                    s_right = 1 - 0.9*(1 / (1+torch.exp(-x + self.shift))) # Sigmoid 1.0 -> 0.1
+                    s_left = 0.1 + 0.9*(1 / (1+torch.exp(-x + self.shift))) # Sigmoid 0.1 -> 1.0
+                    w[164:] += s_right
+                    w[:64] += s_left
+                
+            # Mask and Normalizer    
+            self.mask_w = w.to(lidars.get_device())
+            self.norm = torch.sqrt(w.sum())
 
-        # Eucledian distances between in-batch anchors lidar readings
-        lid_dists = (lidars.unsqueeze(0) - lidars.unsqueeze(1)).pow(2).sum(dim=-1).sqrt() 
+        # Weighted eucledian distances between in-batch anchors lidar readings
+        lid_dists = (lidars.unsqueeze(0) - lidars.unsqueeze(1)).pow(2) * self.mask_w        
+        lid_dists = lid_dists.sum(dim=-1).sqrt() 
         # Normalize distances to [0, 1]
-        lid_dists /= sqrt(lidars.shape[1])
+        lid_dists /= self.norm
 
         # Differences between in-batch anchors goal distances
         gd_diffs = torch.abs(gds.unsqueeze(0) - gds.unsqueeze(1))

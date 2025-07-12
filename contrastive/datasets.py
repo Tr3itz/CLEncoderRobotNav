@@ -1,6 +1,5 @@
 # Torch imports
 import torch
-import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from torchvision.transforms import v2
 
@@ -12,14 +11,15 @@ import pandas as pd
 from PIL import Image
 from glob import glob
 from tqdm.auto import tqdm
-from typing import Iterable
 
 
 class ContrastiveDataset(Dataset):
     def __init__(
             self, 
             dir: str,
-            metric: str,  
+            metric: str,
+            mask: str,
+            shift: float,  
             transforms: v2,
             augmentations: list=None,
             mode: str='train',
@@ -31,6 +31,7 @@ class ContrastiveDataset(Dataset):
         Parameters:
         - dir: str            - directory of the dataset
         - metric: str         - metric for computing similarity (lidar, goal, both)
+        - mask: str           - LiDAR readings mask type
         - transforms: v2      - image transformations to apply
         - augmentations       - augmentations for positive examples
         - seed: int           - random seed for reproducibility        
@@ -49,11 +50,7 @@ class ContrastiveDataset(Dataset):
 
         # Dataset mode
         assert mode in ['train', 'val']
-        self.mode = mode
-
-        # Similarity metric
-        assert metric in ['lidar', 'goal', 'both']
-        self.metric = metric
+        self.mode = mode            
 
         # Annotations dataframe
         assert os.path.exists(self.dir)
@@ -66,6 +63,35 @@ class ContrastiveDataset(Dataset):
 
         # Pandas methods will be used on this dataframe
         assert isinstance(self.annot_df, pd.DataFrame)
+
+        # Similarity metric
+        assert metric in ['lidar', 'goal', 'both']
+        self.metric = metric
+        if metric in ['lidar', 'both']:
+            assert mask in ['naive', 'binary', 'soft']
+
+            # Define LiDAR readings mask
+            rand_sample = self.annot_df.sample(n=1).iloc[0]
+            w = np.zeros(rand_sample['laser_readings']['scan'].squeeze().shape[0])
+            match mask:
+                case 'naive':
+                    w += 1
+                case 'binary':
+                    # In FOV readings
+                    w[64:164] += 1
+                case 'soft':
+                    assert shift is not None
+                    # In FOV readings
+                    w[64:164] += 1
+                    # Out of FOV readings
+                    x = np.linspace(0.0, 1.0, w[164:].shape[0])
+                    sigmoid = 1 - 0.9*(1 / (1+np.exp(-x + shift))) # Sigmoid 1.0 -> 0.1
+                    w[164:] += sigmoid
+                    w[63::-1] += sigmoid
+                
+            # Mask and Normalizer    
+            self.mask = w
+            self.norm = np.sqrt(w.sum())
 
     def __len__(self):
         return self.annot_df.shape[0]
@@ -110,7 +136,7 @@ class ContrastiveDataset(Dataset):
             goal_pos.add((goal_x, goal_y))
             
             # Weighted eucledian distance
-            eucledian_dists = df['laser_readings'].map(lambda x: np.sqrt(np.sum((lidar - x['scan'].squeeze())**2))/np.sqrt(lidar.shape[0])).to_numpy()
+            eucledian_dists = df['laser_readings'].map(lambda x: np.sqrt(np.sum(self.mask*(lidar - x['scan'].squeeze())**2)) / self.norm).to_numpy()
             lid_dist_mat[idx] *= eucledian_dists
 
             gd_diffs = df.apply(lambda x: abs(goal_dist - np.sqrt((x['robot_pos_x'] - x['target_point_x'])**2 + (x['robot_pos_y']  - x['target_point_y'])**2)), axis=1).to_numpy()
@@ -161,6 +187,8 @@ class WithAugmentationsDataset(ContrastiveDataset):
             self,
             dir: str,
             metric: str,
+            mask: str,
+            shift: float,
             n_pos: int,
             pos_thresh: float,
             n_neg: int,
@@ -177,6 +205,7 @@ class WithAugmentationsDataset(ContrastiveDataset):
         Parameters:
         - dir: str            - directory of the dataset
         - metric: str         - metric for computing sample similarity (lidar, goal, both)
+        - mask: str           - LiDAR readings mask type
         - n_pos: int          - number of positive examples
         - pos_thresh: float   - positive similarity threshold
         - n_neg: int          - number of negative examples
@@ -189,6 +218,8 @@ class WithAugmentationsDataset(ContrastiveDataset):
         super().__init__(
             dir=dir,
             metric=metric,
+            mask=mask,
+            shift=shift,
             transforms=transforms,
             augmentations=augmentations,
             mode=mode,
@@ -380,9 +411,8 @@ class WithAugmentationsDataset(ContrastiveDataset):
         """
         assert len(lidars) == len(gds) == 2
 
-        # Lidar normalized eucledian distances
-        L = lidars[0].shape[0]
-        lid_dist = np.sqrt(np.sum((lidars[0] - lidars[1])**2))/np.sqrt(L)
+        # LiDAR weighted eucledian distances
+        lid_dist = np.sqrt(np.sum(self.mask*(lidars[0] - lidars[1])**2)) / self.norm
         # Goal distances difference
         gd_diff = np.abs(gds[0] - gds[1])
 
