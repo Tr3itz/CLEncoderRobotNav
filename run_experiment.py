@@ -50,6 +50,8 @@ def get_dataset(args) -> tuple[WithAugmentationsDataset]:
         dir=f'{args.datasets_path}/{args.dataset}',
         val_room=args.val_room,
         metric=args.metric,
+        mask=args.mask,
+        shift = args.shift,
         n_pos=args.n_pos,
         pos_thresh=args.pos_thresh,
         n_neg=args.n_neg,
@@ -64,6 +66,8 @@ def get_dataset(args) -> tuple[WithAugmentationsDataset]:
         dir=f'{args.datasets_path}/{args.dataset}',
         val_room=args.val_room,
         metric=args.metric,
+        mask=args.mask,
+        shift = args.shift,
         n_pos=args.n_pos,
         pos_thresh=args.pos_thresh,
         n_neg=args.n_neg,
@@ -421,7 +425,7 @@ if __name__ == '__main__':
     # Model, Loss and Optimizer
     model = ResNetEncoder()
     loss_fn = SoftNearestNeighbor(
-        metric=args.metric,
+        args=args,
         tau_min=args.min_tau,
         tau_max=args.max_tau
     )
