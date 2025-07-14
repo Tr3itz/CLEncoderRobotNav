@@ -262,7 +262,7 @@ class WithAugmentationsDataset(ContrastiveDataset):
         ep = record['episode']
         step = record['step']
         
-        # Load anchor image
+        # TODO: Load anchor image from `augmented_results`
         img = Image.open(f'{self.dir}/Room{R}/Setting{S}/episode_{ep:04}/rgb_{step:05}.png')
         anchor = self.transforms(img)
 

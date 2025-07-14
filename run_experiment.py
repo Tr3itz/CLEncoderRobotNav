@@ -203,6 +203,7 @@ def validate(
     #############################################################################################################
 
     ############################# Augmentations 2D t-SNE visualization ################################
+    # TODO: create different visualizations per augmentation type (background, warehouse, etc.)
     dx = fig.add_subplot(3,2,5)
     dx.set_title('t-SNE Embedding Space (Augmentations)')
     dx.grid()
