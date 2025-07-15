@@ -418,6 +418,8 @@ class WithAugmentationsDataset(ContrastiveDataset):
         gd = np.sqrt((record['robot_pos_x'] - goal_x)**2 + (record['robot_pos_y'] - goal_y)**2) 
         gd /= max_gd
 
+        # TODO: add the orientation towards the goal position as additional information to compute sample similarity
+
         return lidar, gd
     
     def _sim(self, lidars: list, gds: list):
