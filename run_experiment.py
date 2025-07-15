@@ -16,6 +16,7 @@ import random
 import numpy as np
 from sklearn.manifold import TSNE
 from matplotlib import pyplot as plt; plt.switch_backend('agg')
+from matplotlib.axes import Axes
 from tqdm import tqdm
 from datetime import datetime
 from configurations import Configurations
@@ -80,6 +81,43 @@ def get_dataset(args) -> tuple[WithAugmentationsDataset]:
     return train_dataset, val_dataset
 
 
+def inter_visualization(inter_embeds: torch.Tensor, ax: Axes):
+    # Prepare embeddings for t-SNE
+    aug_embeds = [] 
+    tsne_idx = []   # aug index for colormap
+    for aug_idx in range(inter_embeds.shape[1]):
+        aug = inter_embeds[:, aug_idx, ...]
+        aug_embeds.append(aug)
+        tsne_idx.extend([aug_idx for _ in range(aug.shape[0])])
+
+    # Colormap
+    aug_idx = np.unique(tsne_idx)
+    cmap = plt.get_cmap('tab10')
+    idx_to_color = {idx: cmap(idx) for idx in aug_idx}
+    colors = [idx_to_color[i] for i in tsne_idx]
+
+    print('Augmentations t-SNE visualization...')
+    aug_embeds = torch.cat(aug_embeds, dim=0)
+    aug_embeds = TSNE(
+        n_components=2,
+        perplexity=30,
+        learning_rate='auto',
+        init='random',
+        random_state=42
+    ).fit_transform(aug_embeds)      
+    ax.scatter(aug_embeds[:,0], aug_embeds[:,1], c=colors)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    
+    # Create a legend manually
+    handles = [
+        plt.Line2D([0], [0], marker='o', color='w', label='Anchor' if i == 0 else f'Augmentation {i}',
+                   markerfacecolor=idx_to_color[i], markersize=8)
+        for i in aug_idx
+    ]
+    ax.legend(handles=handles)
+
+
 def validate(
         args,
         model: nn.Module,
@@ -93,9 +131,9 @@ def validate(
     device = next(model.parameters()).device
 
     val_loss = 0
-    intra_embeddings = []   # embeddings for intra-consistency analysis
-    inter_embeddings = []   # embeddings for inter-consistency analysis
-    inter_set = []          # settings included in embeddings observations 
+    intra_embeddings = [] # embeddings for intra-consistency analysis
+    inter_train = []      # embeddings for inter-consistency analysis (training augmentations)
+    inter_ho = []         # embeddings for inter-consistency analysis (hold-out augmentations)
     model.eval()
     with torch.no_grad():
         for batch, data in enumerate(tqdm(data_loader, unit='imgs', total= len(data_loader), leave=True)):            
@@ -119,11 +157,11 @@ def validate(
             if args.n_neg > 0:
                 # Generate embeddings of negative examples
                 neg_embeddings = model(neg_ex)
-                # Adaptive Contrastive Loss
-                val_loss += loss_fn(anc_embeddings, pos_embeddings, pos_sim_scores, neg_batch=neg_embeddings, neg_sim_scores=neg_sim_scores).detach().item()
+                # Adaptive Contrastive Loss (consider only hold-out augmentations)
+                val_loss += loss_fn(anc_embeddings, pos_embeddings[:, 5:, ...], pos_sim_scores[:, 5:], neg_batch=neg_embeddings, neg_sim_scores=neg_sim_scores).detach().item()
             else:
-                # Adaptive Contrastive Loss
-                val_loss += loss_fn(anc_embeddings, pos_embeddings, pos_sim_scores, lidars=lidars, gds=gds).detach().item()
+                # Adaptive Contrastive Loss (consider only hold-out augmentations)
+                val_loss += loss_fn(anc_embeddings, pos_embeddings[:, 5:, ...], pos_sim_scores[:, 5:], lidars=lidars, gds=gds).detach().item()
             
             # For intra-consistency analysis just take anchor embeddings
             intra_embeddings.append(anc_embeddings.cpu()) 
@@ -131,12 +169,8 @@ def validate(
             # For inter-scene consistency analysis take anchors and augmentations embeddings
             ancs = anc_embeddings.unsqueeze(1).cpu()
             augs = pos_embeddings[:, :-args.n_pos, ...].cpu() if args.n_pos > 0 else pos_embeddings.cpu()
-            embeddings = torch.cat([ancs, augs], dim=1)
-            inter_embeddings.append(embeddings)
-            for idx in range(0, args.batch_size):
-                record_idx = batch*args.batch_size + idx    
-                if record_idx < dataset.annot_df.shape[0]:           
-                    inter_set.append(dataset.annot_df.iloc[record_idx]['setting'])
+            inter_train.append(torch.cat([ancs, augs[:, :5, ...]], dim=1))
+            inter_ho.append(torch.cat([ancs, augs[:, 5:, ...]], dim=1))
 
             # Free space
             torch.cuda.empty_cache()
@@ -150,6 +184,8 @@ def validate(
     fig.suptitle(f'Validation epoch {epoch + 1}')
 
     ############################## INTRA-SCENE CONSISTENCY ###################################
+    print('Intra-scene consistency visualization...')
+
     bins = [[] for _ in range(n_bins)]
     bin_tol = dataset.sim_scores_range / n_bins
     intra_embeddings = torch.cat(intra_embeddings, dim=0)
@@ -192,73 +228,32 @@ def validate(
     ##########################################################################################  
 
     ####################################### INTER-SCENE CONSISTENCY ############################################
-    inter_embeddings = torch.cat(inter_embeddings, dim=0)
-    augs_sim = F.cosine_similarity(inter_embeddings[:, 0, ...].unsqueeze(1), inter_embeddings[:, 1:, ...], dim=2)
-    augs_sim = augs_sim.mean(dim=0)
+    inter_train = torch.cat(inter_train, dim=0)
+    inter_ho = torch.cat(inter_ho, dim=0)    
+    train_sim = F.cosine_similarity(inter_train[:, 0, ...].unsqueeze(1), inter_train[:, 1:, ...], dim=2)
+    ho_sim = F.cosine_similarity(inter_ho[:, 0, ...].unsqueeze(1), inter_ho[:, 1:, ...], dim=2)
+    train_sim = train_sim.mean(dim=0)
+    ho_sim = ho_sim.mean(dim=0)
+    
     cx = fig.add_subplot(3,2,4)
     cx.set_title('Inter-scene Consistency')
     cx.set_ylabel('Embedding Similarity')
-    cx.boxplot(augs_sim, orientation='vertical')
-    cx.set_xticks([])
+    cx.boxplot([train_sim, ho_sim], tick_labels=['Training', 'Hold-out'], orientation='vertical')
     #############################################################################################################
 
     ############################# Augmentations 2D t-SNE visualization ################################
-    # TODO: create different visualizations per augmentation type (background, warehouse, etc.)
+    # Train augmentations
     dx = fig.add_subplot(3,2,5)
-    dx.set_title('t-SNE Embedding Space (Augmentations)')
+    dx.set_title('t-SNE Embedding Space (Training Augmentations)')
     dx.grid()
+    inter_visualization(inter_embeds=inter_train, ax=dx)
 
-    aug_embeddings = []
-    tsne_idx = []
-    for aug_idx in range(inter_embeddings.shape[1]):
-        aug = inter_embeddings[:, aug_idx, ...]
-        aug_embeddings.append(aug)
-        tsne_idx.extend([aug_idx for _ in range(aug.shape[0])])
-
-    # Colormap
-    aug_idx = np.unique(tsne_idx)
-    cmap = plt.get_cmap('tab10')
-    idx_to_color = {idx: cmap(idx) for idx in aug_idx}
-    colors = [idx_to_color[i] for i in tsne_idx]
-
-    print('Augmentations t-SNE visualization...')
-    aug_embeddings = torch.cat(aug_embeddings, dim=0)
-    aug_embeddings = TSNE(
-        n_components=2,
-        perplexity=30,
-        learning_rate='auto',
-        init='random',
-        random_state=42
-    ).fit_transform(aug_embeddings)      
-    dx.scatter(aug_embeddings[:,0], aug_embeddings[:,1], c=colors)
-    dx.set_xticks([])
-    dx.set_yticks([])
-    
-    # Create a legend manually
-    handles = [
-        plt.Line2D([0], [0], marker='o', color='w', label='Anchor' if i == 0 else f'Augmentation {i}',
-                   markerfacecolor=idx_to_color[i], markersize=8)
-        for i in aug_idx
-    ]
-    dx.legend(handles=handles)
-    ###################################################################################################
-
-   ################################ Episodes 2D t-SNE visualization ###################################
-    print('Episodes t-SNE visualization...')
-    rgb_embeddings = TSNE(
-        n_components=2,
-        perplexity=30,
-        learning_rate='auto',
-        init='random',
-        random_state=42
-    ).fit_transform(intra_embeddings)
-
+    # Hold-out augmentations
     ex = fig.add_subplot(3,2,6)
-    ex.set_title(f"t-SNE Embedding Space (Settings)")
-    ex.scatter(rgb_embeddings[:,0], rgb_embeddings[:,1], c=inter_set, cmap='tab10')
-    ex.set_xticks([])
-    ex.set_yticks([])
-    ##################################################################################################
+    ex.set_title('t-SNE Embedding Space (Hold-out Augmentations)')
+    ex.grid()
+    inter_visualization(inter_embeds=inter_ho, ax=ex)
+    ###################################################################################################
 
     # Save and close figure
     fig.savefig(f'{figs_dir}/epoch_{epoch + 1}.png', format='png')
