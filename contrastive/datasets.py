@@ -262,8 +262,8 @@ class WithAugmentationsDataset(ContrastiveDataset):
         ep = record['episode']
         step = record['step']
         
-        # Load anchor image
-        img = Image.open(f'{self.dir}/Room{R}/Setting{S}/episode_{ep:04}/rgb_{step:05}.png')
+        # Load anchor image from `augmented_results`
+        img = Image.open(f'{self.dir}/Room{R}/Setting{S}/episode_{ep:04}/augmented_results/aug2_rgb_{step:05}.png')
         anchor = self.transforms(img)
 
         # Augmentations of the anchor image
@@ -370,14 +370,29 @@ class WithAugmentationsDataset(ContrastiveDataset):
         ep = record['episode']
         step = record['step']
 
-        # Paths to all augmentations
-        aug_paths = glob(f'{self.dir}/Room{R}/Setting{S}/episode_{ep:04}/augmented_results/*_rgb_{step:05}.png')
+        # Path to augmentations directory
+        aug_dir = f'{self.dir}/Room{R}/Setting{S}/episode_{ep:04}/augmented_results'
 
-        # Load augmented images
-        augs = []
-        for path in aug_paths:
-            img = Image.open(path)
-            augs.append(self.transforms(img))
+        # No wall
+        aug_1 = self.transforms(Image.open(f'{aug_dir}/aug3_rgb_{step:05}.png'))
+        # No background
+        aug_2 = self.transforms(Image.open(f'{aug_dir}/aug4_rgb_{step:05}.png'))
+        # Warehouse 1
+        aug_3 = self.transforms(Image.open(f'{aug_dir}/aug5_rgb_{step:05}.png'))
+        # Warehouse 2
+        aug_4 = self.transforms(Image.open(f'{aug_dir}/aug6_rgb_{step:05}.png'))
+
+        # Training augmentations
+        augs = [aug_1, aug_2, aug_3, aug_4]
+
+        if self.mode == 'val':
+            # Stadium
+            aug_5 = self.transforms(Image.open(f'{aug_dir}/aug1_rgb_{step:05}.png'))
+            # Warehouse 3
+            aug_6 = self.transforms(Image.open(f'{aug_dir}/aug7_rgb_{step:05}.png'))
+
+            # Include hold-out scenes for validation
+            augs.extend([aug_5, aug_6])
 
         return augs
     
