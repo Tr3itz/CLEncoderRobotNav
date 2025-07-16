@@ -128,3 +128,12 @@ class SoftNearestNeighbor(nn.Module):
         batch_sims = torch.exp(batch_sims / batch_tau)  # removed '-' in front of similarity
 
         return batch_sims.sum(dim=1)
+    
+# TODO: implement a standard SNN Loss based on eucledian distances between embeddings rather than similarities    
+
+class SNNCosineSimilarityLoss(SoftNearestNeighbor):
+    pass
+
+
+class SNNEucledianDistanceLoss(SoftNearestNeighbor):
+    pass
