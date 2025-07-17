@@ -113,6 +113,27 @@ class ContrastiveDataset(Dataset):
         corner_y = -5 if y >= 0 else 5
         return corner_x, corner_y 
     
+    def _normalize_angle(self, angle: float):
+        """
+        Normalize angle in [-pi, pi]
+        """
+        return (angle + np.pi) % (2 * np.pi) - np.pi
+    
+    def _relative_angle(self, record: pd.Series):
+        """
+        Compute orientation w.r.t. the goal position
+        """
+        # Info
+        robot_x, robot_y = record['robot_pos_x'], record['robot_pos_y']
+        goal_x, goal_y = record['target_point_x'], record['target_point_y']
+        theta_r = record['robot_yaw'] 
+
+        # Relative angle
+        dx = goal_x - robot_x
+        dy = goal_y - robot_y
+        theta_g = np.arctan2(dy, dx)
+        return self._normalize_angle(theta_g - theta_r)
+    
     def _init_sim_matrix(self):
         """
         Initialize similarity matrix of samples in the dataset,
@@ -124,23 +145,31 @@ class ContrastiveDataset(Dataset):
 
         lid_dist_mat = np.ones(shape=(shape, shape), dtype=np.float32)
         gd_mat = np.ones(shape=(shape, shape), dtype=np.float32)
+        ori_diff_mat = np.ones(shape=(shape, shape), dtype=np.float32)
         goal_pos = set()
 
         # Compute distance matrices
         print(f"\nCOMPUTING {'TRAINING' if self.mode == 'train' else 'VALIDATION'} SIMILARITY SCORES MATRIX...")
         for idx, obs in tqdm(df.iterrows(), unit='obs', total=shape):
+            # Observations info
             lidar = obs['laser_readings']['scan'].squeeze()
             goal_x, goal_y = obs['target_point_x'], obs['target_point_y']
             goal_dist = np.sqrt((obs['robot_pos_x']  - goal_x)**2 + (obs['robot_pos_y']  - goal_y)**2)
+            phi = self._relative_angle(obs)
 
             goal_pos.add((goal_x, goal_y))
             
-            # Weighted eucledian distance
+            # Weighted LiDAR eucledian distance
             eucledian_dists = df['laser_readings'].map(lambda x: np.sqrt(np.sum(self.mask*(lidar - x['scan'].squeeze())**2)) / self.norm).to_numpy()
             lid_dist_mat[idx] *= eucledian_dists
 
+            # Goal distance differences
             gd_diffs = df.apply(lambda x: abs(goal_dist - np.sqrt((x['robot_pos_x'] - x['target_point_x'])**2 + (x['robot_pos_y']  - x['target_point_y'])**2)), axis=1).to_numpy()
             gd_mat[idx] *= gd_diffs
+
+            # Differences in the orientation w.r.t. the goal
+            ori_diffs = df.apply(lambda x: np.abs(self._normalize_angle(phi - self._relative_angle(x))) / np.pi, axis=1)
+            ori_diff_mat[idx] *= ori_diffs
 
         # Normalize goal dist values between [0,1] knowing the room size
         max_gd = 0
@@ -154,9 +183,9 @@ class ContrastiveDataset(Dataset):
         if self.metric == 'lidar':
             sim_scores_mat = (1 - lid_dist_mat)
         elif self.metric == 'goal':
-            sim_scores_mat = (1 - gd_mat)
+            sim_scores_mat = (1 - gd_mat)*(1 - ori_diff_mat)
         else:
-            sim_scores_mat = (1 - lid_dist_mat)*(1 - gd_mat)
+            sim_scores_mat = (1 - lid_dist_mat)*(1 - gd_mat)*(1 - ori_diff_mat)
         
         return sim_scores_mat
     
@@ -272,7 +301,7 @@ class WithAugmentationsDataset(ContrastiveDataset):
         pos_sim_scores = np.ones(shape=(pos_ex.shape[0],))
         
         # Retrieve additional information for the anchor
-        anc_lidar, anc_gd = self._info(record=record)
+        anc_lidar, anc_gd, anc_phi = self._info(record=record)
 
         if self.n_pos > 0:
             # Load positive examples from any other episode
@@ -287,8 +316,8 @@ class WithAugmentationsDataset(ContrastiveDataset):
             sim_scores = np.ones(shape=(df.shape[0],))          
 
             for i in df.index:
-                lidar, gd = self._info(i)
-                sim_scores[i] *= self._sim(lidars=[anc_lidar, lidar], gds=[anc_gd, gd])
+                lidar, gd, phi = self._info(i)
+                sim_scores[i] *= self._sim(lidars=[anc_lidar, lidar], gds=[anc_gd, gd], angles=[anc_phi, phi])
 
             # Sample n_pos negative examples from all samples with score above the threshold
             pos_recs = df[sim_scores >= self.pos_thresh].sample(n=self.n_pos, random_state=self.seed)
@@ -325,7 +354,7 @@ class WithAugmentationsDataset(ContrastiveDataset):
             return anchor, pos_ex, pos_sim_scores, neg_ex, neg_sim_scores
 
         # Return additional information to the anchor for in-batch similarities
-        return anchor, pos_ex, pos_sim_scores, anc_lidar, anc_gd
+        return anchor, pos_ex, pos_sim_scores, anc_lidar, anc_gd, anc_phi
     
     def _annot(self):
         """
@@ -406,11 +435,13 @@ class WithAugmentationsDataset(ContrastiveDataset):
         if record is None:
             record = self.annot_df.iloc[idx]
 
-        # Retrieve lidar readings
+        # Retrieve information
         lidar = record['laser_readings']['scan'].squeeze()
+        robot_x, robot_y = record['robot_pos_x'], record['robot_pos_y']
+        goal_x, goal_y = record['target_point_x'], record['target_point_y']
+        theta_r = record['robot_yaw']
 
         # Compute the maximum possible distance to the goal of the observation
-        goal_x, goal_y = record['target_point_x'], record['target_point_y']
         corner_x, corner_y = self._opposite_corner(goal_x, goal_y)
         max_gd = np.sqrt((goal_x - corner_x)**2 + (goal_y - corner_y)**2)
                 
@@ -418,25 +449,33 @@ class WithAugmentationsDataset(ContrastiveDataset):
         gd = np.sqrt((record['robot_pos_x'] - goal_x)**2 + (record['robot_pos_y'] - goal_y)**2) 
         gd /= max_gd
 
-        return lidar, gd
+        # Compute angle with respect to goal the position (normalized in [-pi, pi])
+        dx = goal_x - robot_x
+        dy = goal_y - robot_y
+        theta_g = np.arctan2(dy, dx)
+        phi = self._normalize_angle(theta_g - theta_r)
+
+        return lidar, gd, phi
     
-    def _sim(self, lidars: list, gds: list):
+    def _sim(self, lidars: list, gds: list, angles: list):
         """
         Measure sample similarity.
         """
-        assert len(lidars) == len(gds) == 2
+        assert len(lidars) == len(gds) == len(angles) == 2
 
         # LiDAR weighted eucledian distances
         lid_dist = np.sqrt(np.sum(self.mask*(lidars[0] - lidars[1])**2)) / self.norm
         # Goal distances difference
         gd_diff = np.abs(gds[0] - gds[1])
+        # Difference in the orientation w.r.t. the goal
+        phi_diff = np.abs(self._normalize_angle(angles[0] - angles[1])) / np.pi
 
         if self.metric == 'lidar':
             return (1 - lid_dist)
         elif self.metric == 'goal':
-            return (1 - gd_diff)
+            return (1 - gd_diff)*(1 - phi_diff)
         else:
-            return (1 - lid_dist)*(1 - gd_diff)
+            return (1 - lid_dist)*(1 - gd_diff)*(1 - phi_diff)
         
     def _load(self, records: pd.DataFrame) -> torch.Tensor:
         """
