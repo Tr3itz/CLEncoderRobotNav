@@ -265,7 +265,7 @@ class WithAugmentationsDataset(ContrastiveDataset):
 
         # Annotations
         assert val_room in self.annot_df['room'].unique()
-        val_sets = np.random.choice(self.annot_df['setting'].unique(), size=5)
+        val_sets = np.sort(self.annot_df['setting'].unique())[-5:]
         if self.mode == 'train':
             self.annot_df = self.annot_df[
                 (self.annot_df['room'] != val_room) |
