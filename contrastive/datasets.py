@@ -340,8 +340,8 @@ class WithAugmentationsDataset(ContrastiveDataset):
             sim_scores = np.ones(shape=(df.shape[0],))          
 
             for i in df.index:
-                lidar, gd = self._info(i)
-                sim_scores[i] *= self._sim(lidars=[anc_lidar, lidar], gds=[anc_gd, gd])
+                lidar, gd, phi = self._info(i)
+                sim_scores[i] *= self._sim(lidars=[anc_lidar, lidar], gds=[anc_gd, gd], angles=[anc_phi, phi])
 
             # Sample n_neg negative examples from all samples with score below the threshold
             neg_recs = df[sim_scores <= self.neg_thresh].sample(n=self.n_neg, random_state=self.seed)
