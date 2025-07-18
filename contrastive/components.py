@@ -31,6 +31,7 @@ class SoftNearestNeighbor(nn.Module):
             pos_sim_scores: torch.Tensor, 
             lidars: torch.Tensor=None, 
             gds: torch.Tensor=None, 
+            angles: torch.Tensor=None,
             neg_batch: torch.Tensor=None, 
             neg_sim_scores: torch.Tensor=None
         ):
@@ -65,12 +66,12 @@ class SoftNearestNeighbor(nn.Module):
         else:
             # Compute SNN loss with in-batch negative examples
             num = pos_sims.sum(dim=1)
-            den = self._in_batch_negatives(anc_batch, lidars, gds)
+            den = self._in_batch_negatives(anc_batch, lidars, gds, angles)
             snn = -torch.log(num / (num + den))
 
         return snn.mean()
     
-    def _in_batch_negatives(self, anc_batch: torch.Tensor, lidars: torch.Tensor, gds: torch.Tensor):
+    def _in_batch_negatives(self, anc_batch: torch.Tensor, lidars: torch.Tensor, gds: torch.Tensor, angles: torch.Tensor):
         """
         Compute in-batch negatives for anchors.
         """
@@ -106,13 +107,17 @@ class SoftNearestNeighbor(nn.Module):
         # Differences between in-batch anchors goal distances
         gd_diffs = torch.abs(gds.unsqueeze(0) - gds.unsqueeze(1))
 
+        # Differences between in-batch anchors orientations w.r.t. the goal
+        ori_diffs = ((angles.unsqueeze(0) - angles.unsqueeze(1)) + torch.pi) % (2 * torch.pi) - torch.pi
+        ori_diffs = torch.abs(ori_diffs) / torch.pi
+
         # Distances between in-batch examples
         if self.metric == 'lidar':
             batch_dists = lid_dists
         elif self.metric == 'goal':
-            batch_dists = gd_diffs
+            batch_dists = gd_diffs * ori_diffs
         else:
-            batch_dists = lid_dists * gd_diffs       
+            batch_dists = lid_dists * gd_diffs * ori_diffs       
 
         # Embedding similarities between anchors and in-batch negative examples
         batch_sims = F.cosine_similarity(anc_batch.unsqueeze(1), anc_batch.unsqueeze(0), dim=2)

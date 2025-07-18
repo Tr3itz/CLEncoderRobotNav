@@ -145,10 +145,10 @@ def validate(
                 pos_ex, pos_sim_scores = pos_ex.to(device), pos_sim_scores.to(device)
                 neg_ex, neg_sim_scores = neg_ex.to(device), neg_sim_scores.to(device)       
             else:
-                anchors, pos_ex, pos_sim_scores, lidars, gds = data
+                anchors, pos_ex, pos_sim_scores, lidars, gds, angles = data
                 anchors = anchors.to(device)
                 pos_ex, pos_sim_scores = pos_ex.to(device), pos_sim_scores.to(device)
-                lidars, gds = lidars.to(device), gds.to(device)
+                lidars, gds, angles = lidars.to(device), gds.to(device), angles.to(device)
             
             # Generate embeddings
             anc_embeddings = model(anchors)
@@ -161,7 +161,7 @@ def validate(
                 val_loss += loss_fn(anc_embeddings, pos_embeddings[:, 5:, ...], pos_sim_scores[:, 5:], neg_batch=neg_embeddings, neg_sim_scores=neg_sim_scores).detach().item()
             else:
                 # Adaptive Contrastive Loss (consider only hold-out augmentations)
-                val_loss += loss_fn(anc_embeddings, pos_embeddings[:, 5:, ...], pos_sim_scores[:, 5:], lidars=lidars, gds=gds).detach().item()
+                val_loss += loss_fn(anc_embeddings, pos_embeddings[:, 5:, ...], pos_sim_scores[:, 5:], lidars=lidars, gds=gds, angles=angles).detach().item()
             
             # For intra-consistency analysis just take anchor embeddings
             intra_embeddings.append(anc_embeddings.cpu()) 
@@ -308,10 +308,10 @@ def train(
                 pos_ex, pos_sim_scores = pos_ex.to(device), pos_sim_scores.to(device)
                 neg_ex, neg_sim_scores = neg_ex.to(device), neg_sim_scores.to(device)       
             else:
-                anchors, pos_ex, pos_sim_scores, lidars, gds = data
+                anchors, pos_ex, pos_sim_scores, lidars, gds, angles = data
                 anchors = anchors.to(device)
                 pos_ex, pos_sim_scores = pos_ex.to(device), pos_sim_scores.to(device)
-                lidars, gds = lidars.to(device), gds.to(device)
+                lidars, gds, angles = lidars.to(device), gds.to(device), angles.to(device)
 
             # Generate embeddings
             anc_embeddings = model(anchors)
@@ -324,7 +324,7 @@ def train(
                 loss = loss_fn(anc_embeddings, pos_embeddings, pos_sim_scores, neg_batch=neg_embeddings, neg_sim_scores=neg_sim_scores)
             else:
                 # Adaptive Contrastive Loss
-                loss = loss_fn(anc_embeddings, pos_embeddings, pos_sim_scores, lidars=lidars, gds=gds)
+                loss = loss_fn(anc_embeddings, pos_embeddings, pos_sim_scores, lidars=lidars, gds=gds, angles=angles)
 
             # Backpropagation
             optimizer.zero_grad()
