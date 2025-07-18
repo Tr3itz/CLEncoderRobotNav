@@ -129,7 +129,7 @@ class SoftNearestNeighbor(nn.Module):
         batch_dists = batch_dists[mask].view(B, B-1)
 
         # Adaptive temperatures
-        batch_tau = self.tau_min + (self.tau_max - self.tau_min)*((1-batch_dists) / self.tau_max)
+        batch_tau = self.tau_min + (self.tau_max - self.tau_min) * (1-batch_dists)
         batch_sims = torch.exp(batch_sims / batch_tau)  # removed '-' in front of similarity
 
         return batch_sims.sum(dim=1)
