@@ -8,7 +8,7 @@ from torchvision.transforms import v2
 # Contrastive imports
 from contrastive.datasets import WithAugmentationsDataset
 from contrastive.encoder import ResNetEncoder
-from contrastive.components import SoftNearestNeighbor
+from contrastive.components import SoftNearestNeighbor, SNNCosineSimilarityLoss, SNNEucledianDistanceLoss, SNNManhattanDistanceLoss
 
 # Utils
 import os
@@ -329,6 +329,7 @@ def train(
             # Backpropagation
             optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
             # Update statistics
@@ -420,7 +421,7 @@ if __name__ == '__main__':
 
     # Model, Loss and Optimizer
     model = ResNetEncoder()
-    loss_fn = SoftNearestNeighbor(
+    loss_fn = SNNManhattanDistanceLoss(
         args=args,
         tau_min=args.min_tau,
         tau_max=args.max_tau
