@@ -9,6 +9,11 @@ from torchvision.transforms import v2
 from contrastive.datasets import WithAugmentationsDataset
 from contrastive.encoder import ResNetEncoder
 from contrastive.components import SoftNearestNeighbor, SNNCosineSimilarityLoss, SNNEucledianDistanceLoss, SNNManhattanDistanceLoss
+LOSS_FN = {
+    'sim': SNNCosineSimilarityLoss,
+    'l1': SNNManhattanDistanceLoss,
+    'l2': SNNEucledianDistanceLoss
+}
 
 # Utils
 import os
@@ -20,7 +25,6 @@ from matplotlib.axes import Axes
 from tqdm import tqdm
 from datetime import datetime
 from configurations import Configurations
-
 
 def get_dataset(args) -> tuple[WithAugmentationsDataset]:
     transforms = v2.Compose([
@@ -82,40 +86,35 @@ def get_dataset(args) -> tuple[WithAugmentationsDataset]:
 
 
 def inter_visualization(inter_embeds: torch.Tensor, ax: Axes):
+    N_SAMPLES, N_AUGS, DIM = inter_embeds.shape
+
     # Prepare embeddings for t-SNE
-    aug_embeds = [] 
-    tsne_idx = []   # aug index for colormap
-    for aug_idx in range(inter_embeds.shape[1]):
-        aug = inter_embeds[:, aug_idx, ...]
-        aug_embeds.append(aug)
-        tsne_idx.extend([aug_idx for _ in range(aug.shape[0])])
+    flattened_embeds = inter_embeds.reshape(-1, DIM).numpy()
 
-    # Colormap
-    aug_idx = np.unique(tsne_idx)
-    cmap = plt.get_cmap('tab10')
-    idx_to_color = {idx: cmap(idx) for idx in aug_idx}
-    colors = [idx_to_color[i] for i in tsne_idx]
-
+    # Perform t-SNE
     print('Augmentations t-SNE visualization...')
-    aug_embeds = torch.cat(aug_embeds, dim=0)
-    aug_embeds = TSNE(
+    tsne_embeds = TSNE(
         n_components=2,
         perplexity=30,
         learning_rate='auto',
         init='random',
         random_state=42
-    ).fit_transform(aug_embeds)      
-    ax.scatter(aug_embeds[:,0], aug_embeds[:,1], c=colors)
+    ).fit_transform(flattened_embeds)
+
+    # t-SNE plot
+    tsne_idx = np.repeat(np.arange(N_AUGS), N_SAMPLES)
+    cmap = plt.get_cmap('Set1', N_AUGS)      
+    ax.scatter(tsne_embeds[:,0], tsne_embeds[:,1], c=tsne_idx, cmap=cmap)
     ax.set_xticks([])
     ax.set_yticks([])
     
     # Create a legend manually
     handles = [
         plt.Line2D([0], [0], marker='o', color='w', label='Anchor' if i == 0 else f'Augmentation {i}',
-                   markerfacecolor=idx_to_color[i], markersize=8)
-        for i in aug_idx
+                   markerfacecolor=cmap(i), markersize=8)
+        for i in range(N_AUGS)
     ]
-    ax.legend(handles=handles)
+    ax.legend(handles=handles, title='Augmentations')
 
 
 def validate(
@@ -421,7 +420,7 @@ if __name__ == '__main__':
 
     # Model, Loss and Optimizer
     model = ResNetEncoder()
-    loss_fn = SNNManhattanDistanceLoss(
+    loss_fn = LOSS_FN[args.loss](
         args=args,
         tau_min=args.min_tau,
         tau_max=args.max_tau
