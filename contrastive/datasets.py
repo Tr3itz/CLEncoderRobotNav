@@ -207,7 +207,8 @@ class ContrastiveDataset(Dataset):
             shuffle=(self.mode == 'train'),
             num_workers=num_workers,
             worker_init_fn=self._seed_worker,
-            pin_memory=True
+            pin_memory=True,
+            drop_last=(self.mode == 'train')
         )
     
 

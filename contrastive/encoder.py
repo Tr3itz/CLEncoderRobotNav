@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torchvision.models import resnet50
 
 
@@ -22,8 +23,7 @@ class ReprojectionLayer(nn.Module):
         """
         x = self.fc1(x)
         x = self.activation(x)
-        if x.shape[0] > 1:
-            x = self.bn(x)
+        x = self.bn(x)
 
         return self.fc2(x)
     
@@ -49,20 +49,18 @@ class ResNetEncoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:        
         if x.dim() > 4:
-            """
-            Input shape: [batch_size, #ex, C, H, W]
-            ------------
-            Treat each set of positive examples as a batch of images.
-            """
+            # Input shape: [batch_size, #ex, C, H, W] (e.g., B=32, N=5)
+            B, N, C, H, W = x.shape
+            x = x.view(B * N, C, H, W)
             
-            # Positive/negative examples encodings
-            encodings = [self.encoder(ex) for ex in x]
-
-            # Output shape: [batch_size, #ex, out_dim]
-            return torch.stack(encodings, dim=0)
-        elif x.dim() < 4:
-            # Single image encoding
-            return self.encoder(x.unsqueeze(0))
-
-        # Anchor encodings
-        return self.encoder(x)
+            # Shape: [B*N, out_dim]
+            embeddings = self.encoder(x) 
+            
+            # Output shape: [B, N, out_dim]
+            embeddings = embeddings.view(B, N, -1)
+            return F.normalize(embeddings, dim=-1)
+        
+        # Shape: [B, C, H, W]
+        embeddings = self.encoder(x)
+        # Output shape: [B, N, out_dim]
+        return F.normalize(embeddings, dim=-1)

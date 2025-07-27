@@ -26,6 +26,7 @@ class Configurations:
         self.parser.add_argument('--num_workers', type=int, default=14, help="Number of workers for data loading")
 
         # Loss, Optimizer and Scheduler settings
+        self.parser.add_argument('--loss', type=str, default='sim', choices=['sim', 'l1', 'l2'], help="CL Loss Function")
         self.parser.add_argument('--min_tau', type=float, default=0.1, help="Minimum temperature")
         self.parser.add_argument('--max_tau', type=float, default=1.0, help="Maximum temperature")
         self.parser.add_argument('--learning_rate', type=float, default=1e-4, help="Learning rate for the optimizer")
