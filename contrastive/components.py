@@ -327,5 +327,5 @@ class SNNManhattanDistanceLoss(SoftNearestNeighbor):
         # Adaptive temperatures
         batch_tau = self.tau_min + (self.tau_max - self.tau_min) * batch_scores
         batch_dists = torch.exp(-(batch_dists / batch_tau))
-
+        
         return batch_dists.sum(dim=1)
