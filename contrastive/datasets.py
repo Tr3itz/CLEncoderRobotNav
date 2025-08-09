@@ -661,6 +661,11 @@ class RoomAllAgentsDataset(ContrastiveDataset):
                         try:
                             with open(f'{ep_dir}/{ep}.pkl', 'rb') as f:
                                 df = pickle.load(f)
+
+                                if ep not in df['episode'].unique():
+                                    print(f'[WARN] Fixed episode in DataFrame {ep_dir}/{ep:04}.pkl not matching the name of the directory.')
+                                    df['episode'] =  np.ones(df.shape[0], dtype=int) * ep
+
                                 df.insert(0, 'agent', [agent for _ in range(df.shape[0])])
                                 df.insert(0, 'setting', np.ones(df.shape[0], dtype=int) * setting)
                                 df.insert(0, 'room', np.ones(df.shape[0], dtype=int) * room)
