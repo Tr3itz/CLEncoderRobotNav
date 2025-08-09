@@ -661,7 +661,7 @@ class RoomAllAgentsDataset(ContrastiveDataset):
                         try:
                             with open(f'{ep_dir}/{ep}.pkl', 'rb') as f:
                                 df = pickle.load(f)
-                                df.insert(0, 'agent', pd.Series(data=[agent for _ in range(df.shape[0]+1)], dtype=str))
+                                df.insert(0, 'agent', [agent for _ in range(df.shape[0])])
                                 df.insert(0, 'setting', np.ones(df.shape[0], dtype=int) * setting)
                                 df.insert(0, 'room', np.ones(df.shape[0], dtype=int) * room)
                                 annot_df.append(df)
