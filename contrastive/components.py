@@ -31,7 +31,7 @@ class SoftNearestNeighbor(nn.Module):
         """
         Compute in-batch negatives for anchors.
         """
-        if not hasattr(self, 'mask_w'):
+        if not hasattr(self, 'mask_w') and hasattr(self, 'mask'):
             # Define LiDAR readings mask
             w = torch.zeros(size=(lidars.shape[1],))
             match self.mask:
