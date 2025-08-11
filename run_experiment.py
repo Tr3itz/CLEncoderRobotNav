@@ -2,7 +2,6 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.nn import DataParallel
 from torch.nn import functional as F
 from torchvision.transforms import v2
 
@@ -282,7 +281,6 @@ def train(
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Move the model to the device (use multiple GPUs if available)
-    if torch.cuda.is_available() and torch.cuda.device_count() > 1: model = DataParallel(model)
     model = model.to(device)
     data_loader = train_dataset.get_DataLoader(batch_size=args.batch_size, num_workers=args.num_workers)
 
