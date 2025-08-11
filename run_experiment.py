@@ -6,7 +6,7 @@ from torch.nn import functional as F
 from torchvision.transforms import v2
 
 # Contrastive imports
-from contrastive.datasets import WithAugmentationsDataset
+from contrastive.datasets import RoomAllAgentsDataset
 from contrastive.encoder import ResNetEncoder
 from contrastive.components import SoftNearestNeighbor, SNNCosineSimilarityLoss, SNNEucledianDistanceLoss, SNNManhattanDistanceLoss
 LOSS_FN = {
@@ -26,7 +26,7 @@ from tqdm import tqdm
 from datetime import datetime
 from configurations import Configurations
 
-def get_dataset(args) -> tuple[WithAugmentationsDataset]:
+def get_dataset(args) -> tuple[RoomAllAgentsDataset]:
     transforms = v2.Compose([
         v2.ToImage(),
         v2.ToDtype(torch.uint8, scale=True),
@@ -51,7 +51,7 @@ def get_dataset(args) -> tuple[WithAugmentationsDataset]:
     ]
     
     # Training dataset
-    train_dataset = WithAugmentationsDataset(
+    train_dataset = RoomAllAgentsDataset(
         dir=f'{args.datasets_path}/{args.dataset}',
         val_room=args.val_room,
         metric=args.metric,
@@ -67,7 +67,7 @@ def get_dataset(args) -> tuple[WithAugmentationsDataset]:
     )
 
     # Validation dataset
-    val_dataset = WithAugmentationsDataset(
+    val_dataset = RoomAllAgentsDataset(
         dir=f'{args.datasets_path}/{args.dataset}',
         val_room=args.val_room,
         metric=args.metric,
@@ -120,7 +120,7 @@ def inter_visualization(inter_embeds: torch.Tensor, ax: Axes):
 def validate(
         args,
         model: nn.Module,
-        dataset: WithAugmentationsDataset,
+        dataset: RoomAllAgentsDataset,
         loss_fn: SoftNearestNeighbor,
         figs_dir: str,
         epoch: int,
@@ -264,8 +264,8 @@ def validate(
 def train(
         args,
         model: nn.Module,
-        train_dataset: WithAugmentationsDataset,
-        val_dataset: WithAugmentationsDataset,
+        train_dataset: RoomAllAgentsDataset,
+        val_dataset: RoomAllAgentsDataset,
         loss_fn: nn.Module,
         optimizer: optim.Optimizer,
         exp_dir: str,
@@ -280,7 +280,7 @@ def train(
     # Target device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # Move the model to the device
+    # Move the model to the device (use multiple GPUs if available)
     model = model.to(device)
     data_loader = train_dataset.get_DataLoader(batch_size=args.batch_size, num_workers=args.num_workers)
 
