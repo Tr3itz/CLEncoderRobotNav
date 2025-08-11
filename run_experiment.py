@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.nn import functional as F
+from torch.nn.parallel import DataParallel, DistributedDataParallel
 from torchvision.transforms import v2
 
 # Contrastive imports
