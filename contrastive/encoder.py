@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.models import resnet50
+from torchvision.models import resnet50, mobilenet_v3_large
 
 
 class ReprojectionLayer(nn.Module):
@@ -42,6 +42,44 @@ class ResNetEncoder(nn.Module):
         # Introduce the reprojection layer
         mlp_in = self.encoder.fc.in_features
         self.encoder.fc = ReprojectionLayer(
+            in_dim=mlp_in,
+            hidden_dim=hidden_dim,
+            out_dim=out_dim
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:        
+        if x.dim() > 4:
+            # Input shape: [batch_size, #ex, C, H, W] (e.g., B=32, N=5)
+            B, N, C, H, W = x.shape
+            x = x.view(B * N, C, H, W)
+            
+            # Shape: [B*N, out_dim]
+            embeddings = self.encoder(x) 
+            
+            # Output shape: [B, N, out_dim]
+            embeddings = embeddings.view(B, N, -1)
+            return F.normalize(embeddings, dim=-1)
+        
+        # Shape: [B, C, H, W]
+        embeddings = self.encoder(x)
+        # Output shape: [B, N, out_dim]
+        return F.normalize(embeddings, dim=-1)
+    
+
+class MobileNetV3Encoder(nn.Module):
+    def __init__(self, hidden_dim: int=512, out_dim: int=128) -> None:
+        """
+        MobileNetV3 encoder for Scene Transfer Constrastive Learning.
+        """
+
+        super().__init__()
+
+        # MBNV3 Backbone
+        self.encoder = mobilenet_v3_large()
+
+        # Introduce the reprojection layer
+        mlp_in = self.encoder.classifier[0].in_features
+        self.encoder.classifier = ReprojectionLayer(
             in_dim=mlp_in,
             hidden_dim=hidden_dim,
             out_dim=out_dim
