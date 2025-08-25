@@ -217,6 +217,9 @@ class SingleGPUTrainer(ContrastiveTrainer):
         self.model = self.model.to(self.device)
 
     def train(self):
+        # Environment variable setting
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+
         # Logging
         log = open(f'{self.exp_dir}/log.txt', 'w')
         batch_update = len(self.train_dataloader) // 5
@@ -421,6 +424,9 @@ class MultiGPUTrainer(ContrastiveTrainer):
         print(f"[GPU:{self.gpu_id}] Retrieved distributed DataLoader!")
 
     def train(self):
+        # Environment variable setting
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+
         # Logging
         if self.is_master:
             train_loss_h, val_loss_h = [], []
@@ -509,6 +515,13 @@ class MultiGPUTrainer(ContrastiveTrainer):
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
         self.optimizer.step()
 
+        # Delete unused tensors
+        del anchors, anc_embeddings, pos_ex, pos_sim_scores, pos_embeddings
+        if self.train_ds.n_neg > 0:
+            del neg_ex, neg_sim_scores, neg_embeddings
+        else:
+            del lidars, gds, angles
+
         return loss.detach().item()
 
     def _val_epoch(self, epoch):
@@ -558,6 +571,13 @@ class MultiGPUTrainer(ContrastiveTrainer):
                 pct = round(batch / len(self.val_dataloader), 2) * 100
                 if pct % 10 == 0:
                     print(f'[GPU:{self.gpu_id}, EPOCH: {epoch}] Validation progress {int(pct):.2f}%')
+
+                # Delete unused tensors
+                del anchors, anc_embeddings, pos_ex, pos_sim_scores, pos_embeddings
+                if self.train_ds.n_neg > 0:
+                    del neg_ex, neg_sim_scores, neg_embeddings
+                else:
+                    del lidars, gds, angles
 
                 # Free space
                 torch.cuda.empty_cache()
