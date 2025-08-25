@@ -19,9 +19,9 @@ class Configurations:
         self.parser.add_argument('--mask', type=str, choices=['naive', 'binary', 'soft'], help='LiDAR readings mask')
         self.parser.add_argument('--shift', type=float, help="Shift of the sigmoid for soft LiDAR masking")
         self.parser.add_argument('--n_pos', type=int, default=0, help="Number of positive examples to sample per anchor during training")
-        self.parser.add_argument('--pos_thresh', type=float, default=0.7, help="Positive similarity threshold")
+        self.parser.add_argument('--pos_thresh', type=float, default=0.8, help="Positive similarity threshold")
         self.parser.add_argument('--n_neg', type=int, default=0, help="Number of negative examples to sample per anchor during training")
-        self.parser.add_argument('--neg_thresh', type=float, default=0.5, help="Negative similarity threshold")
+        self.parser.add_argument('--neg_thresh', type=float, default=0.2, help="Negative similarity threshold")
         self.parser.add_argument('--batch_size', type=int, default=8, help="Batch size for training and evaluation")
         self.parser.add_argument('--num_workers', type=int, default=14, help="Number of workers for data loading")
 
