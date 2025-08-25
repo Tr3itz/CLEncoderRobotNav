@@ -1,6 +1,8 @@
 # Torch imports
 import torch
+import torch.distributed as distr
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from torchvision.transforms import v2
 
 # Utils imports
@@ -9,11 +11,13 @@ import pickle
 import numpy as np
 import pandas as pd
 from PIL import Image
+from multiprocessing import shared_memory  
 from glob import glob
 from tqdm.auto import tqdm
+from abc import ABC, abstractmethod
 
 
-class ContrastiveDataset(Dataset):
+class ContrastiveDataset(Dataset, ABC):
     def __init__(
             self, 
             dir: str,
@@ -23,6 +27,7 @@ class ContrastiveDataset(Dataset):
             transforms: v2,
             augmentations: list=None,
             mode: str='train',
+            multi_gpu: bool=False,
             seed: int=42
         ):
         """
@@ -34,6 +39,8 @@ class ContrastiveDataset(Dataset):
         - mask: str           - LiDAR readings mask type
         - transforms: v2      - image transformations to apply
         - augmentations       - augmentations for positive examples
+        - mode: str           - dataset mode (train or val)
+        - multi_gpu: bool     - whether the dataset is used for training a model on multiple GPUs
         - seed: int           - random seed for reproducibility        
         """
         super().__init__()
@@ -50,7 +57,10 @@ class ContrastiveDataset(Dataset):
 
         # Dataset mode
         assert mode in ['train', 'val']
-        self.mode = mode            
+        self.mode = mode
+
+        # Distributed training
+        self.multi_gpu = multi_gpu            
 
         # Annotations dataframe
         assert os.path.exists(self.dir)
@@ -58,7 +68,7 @@ class ContrastiveDataset(Dataset):
             with open(f'{self.dir}/annotations.pkl', 'rb') as f:
                 self.annot_df = pickle.load(f)
         except FileNotFoundError:
-            print(f'Creating annotations file...')
+            print(f"{'Creating annotations file...' if self.multi_gpu else f'[GPU:{distr.get_rank()}] Retrieving additional info...'}")
             self.annot_df = self._annot()
 
         # Pandas methods will be used on this dataframe
@@ -93,9 +103,17 @@ class ContrastiveDataset(Dataset):
             self.mask = w
             self.norm = np.sqrt(w.sum())
 
+    def __del__(self):
+        if hasattr(self, '_shm'):
+            self._shm.close()
+
     def __len__(self):
         return self.annot_df.shape[0]
     
+    @abstractmethod
+    def __getitem__(self): pass
+    
+    @abstractmethod
     def _annot(self):
         """
         Create a global annotations file of the dataset.
@@ -161,8 +179,8 @@ class ContrastiveDataset(Dataset):
         ori_diff_mat = np.ones(shape=(shape, shape), dtype=np.float32)
 
         # Compute distance matrices
-        print(f"\nCOMPUTING {'TRAINING' if self.mode == 'train' else 'VALIDATION'} SIMILARITY SCORES MATRIX...")
-        for idx, obs in tqdm(df.iterrows(), unit='obs', total=shape):
+        if not self.multi_gpu: print(f"\nCOMPUTING {'TRAINING' if self.mode == 'train' else 'VALIDATION'} SIMILARITY SCORES MATRIX...")
+        for idx, obs in tqdm(df.iterrows(), unit='obs', disable=self.multi_gpu, total=shape):
             # Observations info
             lidar = obs['laser_readings']['scan'].squeeze()
             gd = self._goal_distance(obs)
@@ -191,6 +209,27 @@ class ContrastiveDataset(Dataset):
         
         return sim_scores_mat
     
+    def _shared_sim_mat(self):
+        print([print(f"[GPU:{distr.get_rank()}] COMPUTING {'TRAINING' if self.mode == 'train' else 'VALIDATION'} SIMILARITY SCORES MATRIX...")])
+        sim_scores_mat = self._init_sim_matrix()
+
+        # Matrix info 
+        shape = sim_scores_mat.shape
+        dtype = sim_scores_mat.dtype
+        size = sim_scores_mat.nbytes
+
+        print([print(f"[GPU:{distr.get_rank()}] Copying similarity scores matrix on shared memory...")])
+        # Shared memory block creation
+        try:
+            shm = shared_memory.SharedMemory(name='sim_scores_mat', create=True, size=size)
+            shared_mat = np.ndarray(shape=shape, dtype=dtype, buffer=shm.buf)
+            shared_mat[:] = sim_scores_mat[:] # Copy on shared memory
+        except FileExistsError:
+            shm = shared_memory.SharedMemory(name='sim_scores_mat', create=False)
+            shared_mat = np.ndarray(shape=shape, dtype=dtype, buffer=shm.buf)
+
+        return shm, shared_mat
+    
     def _seed_worker(self, worker_id):
         """
         Set the random seed for each worker.
@@ -198,20 +237,39 @@ class ContrastiveDataset(Dataset):
         worker_seed = torch.initial_seed() % 2**32
         np.random.seed(worker_seed)
 
-    def get_DataLoader(self, batch_size: int, num_workers: int) -> DataLoader:
+    def get_DataLoader(self, batch_size: int, num_workers: int=None) -> DataLoader:
         """ 
         Return the torch DataLoader of the dataset.
         """
+        if self.multi_gpu:
+            batch_size = batch_size if self.mode == 'train' else batch_size // 2
+            return DataLoader(
+                dataset=self,
+                batch_size=batch_size,
+                num_workers=num_workers,
+                pin_memory=True,
+                drop_last=(self.mode == 'train'),
+                sampler=DistributedSampler(self)
+            )
+        else:
+            return DataLoader(
+                dataset=self,
+                batch_size=batch_size,
+                shuffle=(self.mode == 'train'),
+                num_workers=num_workers,
+                worker_init_fn=self._seed_worker,
+                pin_memory=True,
+                drop_last=(self.mode == 'train'),
+            )
 
-        return DataLoader(
-            dataset=self,
-            batch_size=batch_size,
-            shuffle=(self.mode == 'train'),
-            num_workers=num_workers,
-            worker_init_fn=self._seed_worker,
-            pin_memory=True,
-            drop_last=(self.mode == 'train')
-        )
+    def set_shared_sim_mat(self):
+        if not hasattr(self, 'sim_scores_mat'):
+            try:
+                shm = shared_memory.SharedMemory(name='sim_scores_mat', create=False)
+                self.sim_scores_mat = np.ndarray(shape=(self.annot_df.shape[0], self.annot_df.shape[0]), dtype=np.float32, buffer=shm.buf)
+                self._shm = shm
+            except FileNotFoundError:
+                print(f'Could not find shared memory block named `sim_scores_mat`.')
     
 
 class WithAugmentationsDataset(ContrastiveDataset):
@@ -229,6 +287,7 @@ class WithAugmentationsDataset(ContrastiveDataset):
             transforms: v2,
             augmentations: list=None,
             mode: str='train',
+            multi_gpu: bool=False,
             seed: int=42
         ):
         """
@@ -245,6 +304,8 @@ class WithAugmentationsDataset(ContrastiveDataset):
         - val_room: int       - validation room
         - transforms: v2      - image transformations to apply
         - augmentations       - additional augmentations for positive examples
+        - mode: str           - dataset mode (train or val)
+        - multi_gpu: bool     - whether the dataset is used for training a model on multiple GPUs
         - seed: int           - random seed for reproducibility
         """
         super().__init__(
@@ -255,6 +316,7 @@ class WithAugmentationsDataset(ContrastiveDataset):
             transforms=transforms,
             augmentations=augmentations,
             mode=mode,
+            multi_gpu=multi_gpu,
             seed=seed
         )
 
@@ -389,7 +451,8 @@ class WithAugmentationsDataset(ContrastiveDataset):
         annot_df = pd.concat(annot_df)
         annot_df.index = list(range(0, annot_df.shape[0]))
 
-        annot_df.to_pickle(f'{self.dir}/annotations.pkl')
+        if not self.multi_gpu:
+            annot_df.to_pickle(f'{self.dir}/annotations.pkl')
 
         return annot_df
     
@@ -513,6 +576,7 @@ class RoomAllAgentsDataset(ContrastiveDataset):
             transforms: v2,
             augmentations: list=None,
             mode: str='train',
+            multi_gpu: bool=False,
             seed: int=42
         ):
         """
@@ -529,6 +593,8 @@ class RoomAllAgentsDataset(ContrastiveDataset):
         - val_room: int       - validation room
         - transforms: v2      - image transformations to apply
         - augmentations       - additional augmentations for positive examples
+        - mode: str           - dataset mode (train or val)
+        - multi_gpu: bool     - whether the dataset is used for training a model on multiple GPUs
         - seed: int           - random seed for reproducibility
         """
         super().__init__(
@@ -539,6 +605,7 @@ class RoomAllAgentsDataset(ContrastiveDataset):
             transforms=transforms,
             augmentations=augmentations,
             mode=mode,
+            multi_gpu=multi_gpu,
             seed=seed
         )
 
@@ -560,8 +627,13 @@ class RoomAllAgentsDataset(ContrastiveDataset):
 
         # Initialize similarity matrix
         if self.mode == 'val':
-            self.sim_scores_mat = self._init_sim_matrix()
-            self.sim_scores_range = self.sim_scores_mat.max() - self.sim_scores_mat.min()
+            if self.multi_gpu:
+                if distr.get_rank() == 0:
+                    self._shm, self.sim_scores_mat = self._shared_sim_mat()
+                    self.sim_scores_range = self.sim_scores_mat.max() - self.sim_scores_mat.min()
+            else:   
+                self.sim_scores_mat = self._init_sim_matrix()
+                self.sim_scores_range = self.sim_scores_mat.max() - self.sim_scores_mat.min()
 
     def __getitem__(self, idx: int):
         # Retrieve image location from the annotations dataframe 
@@ -676,7 +748,8 @@ class RoomAllAgentsDataset(ContrastiveDataset):
         annot_df = pd.concat(annot_df)
         annot_df.index = list(range(0, annot_df.shape[0]))
 
-        annot_df.to_pickle(f'{self.dir}/annotations.pkl')
+        if not self.multi_gpu:
+            annot_df.to_pickle(f'{self.dir}/annotations.pkl')
 
         return annot_df
     
