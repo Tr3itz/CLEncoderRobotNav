@@ -672,13 +672,17 @@ class RoomAllAgentsDataset(ContrastiveDataset):
                 lidar, gd, phi = self._info(i)
                 sim_scores[i] *= self._sim(lidars=[anc_lidar, lidar], gds=[anc_gd, gd], angles=[anc_phi, phi])
 
-            # Sample n_pos negative examples from all samples with score above the threshold
-            pos_recs = df[sim_scores >= self.pos_thresh].sample(n=self.n_pos, random_state=self.seed)
-            pos_ex = torch.cat([pos_ex, self._load(pos_recs)])
-            pos_sim_scores = np.concat([pos_sim_scores, sim_scores[pos_recs.index]])
+            # Find enough negative examples to sample from 
+            cur_thresh = self.pos_thresh
+            pos_recs = df[sim_scores >= cur_thresh]
+            while pos_recs.shape[0] < self.n_pos*2:
+                cur_thresh -= 0.01
+                pos_recs = df[sim_scores >= cur_thresh]
 
-            # Free space
-            del df, sim_scores           
+            # Sample n_pos negative examples from all samples with score above the threshold
+            pos_recs = pos_recs.sample(n=self.n_pos, random_state=self.seed)
+            pos_ex = torch.cat([pos_ex, self._load(pos_recs)])
+            pos_sim_scores = np.concat([pos_sim_scores, sim_scores[pos_recs.index]])          
         
         if self.n_neg > 0:
             # Load negative examples from the same setting of the room
@@ -695,14 +699,19 @@ class RoomAllAgentsDataset(ContrastiveDataset):
                 lidar, gd, phi = self._info(i)
                 sim_scores[i] *= self._sim(lidars=[anc_lidar, lidar], gds=[anc_gd, gd], angles=[anc_phi, phi])
 
+            # Find enough negative examples to sample from 
+            cur_thresh = self.neg_thresh
+            neg_recs = df[sim_scores <= cur_thresh]
+            while neg_recs.shape[0] < self.n_neg*2:
+                cur_thresh += 0.01
+                neg_recs = df[sim_scores <= cur_thresh]
+
             # Sample n_neg negative examples from all samples with score below the threshold
-            neg_recs = df[sim_scores <= self.neg_thresh].sample(n=self.n_neg, random_state=self.seed)
+            neg_recs = neg_recs.sample(n=self.n_neg, random_state=self.seed)
             neg_ex = self._load(neg_recs)
             neg_sim_scores = sim_scores[neg_recs.index]
 
-            # Free space
-            del df, sim_scores
-
+            # Return both anchors and respective positive/negative partitions
             return anchor, pos_ex, pos_sim_scores, neg_ex, neg_sim_scores
 
         # Return additional information to the anchor for in-batch similarities
@@ -827,12 +836,15 @@ class RoomAllAgentsDataset(ContrastiveDataset):
         """
         assert len(lidars) == len(gds) == len(angles) == 2
 
-        # LiDAR weighted eucledian distances
-        lid_dist = np.sqrt(np.sum(self.mask*(lidars[0] - lidars[1])**2)) / self.norm
-        # Goal distances difference
-        gd_diff = np.abs(gds[0] - gds[1])
-        # Difference in the orientation w.r.t. the goal
-        phi_diff = np.abs(self._normalize_angle(angles[0] - angles[1])) / np.pi
+        if self.metric in ['lidar', 'both']:
+            # LiDAR weighted eucledian distances
+            lid_dist = np.sqrt(np.sum(self.mask*(lidars[0] - lidars[1])**2)) / self.norm
+
+        if self.metric in ['goal', 'both']:
+            # Goal distances difference
+            gd_diff = np.abs(gds[0] - gds[1])
+            # Difference in the orientation w.r.t. the goal
+            phi_diff = np.abs(self._normalize_angle(angles[0] - angles[1])) / np.pi
 
         if self.metric == 'lidar':
             return (1 - lid_dist)
