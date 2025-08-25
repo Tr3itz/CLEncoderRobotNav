@@ -1,9 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from abc import ABC, abstractmethod
 
 
-class SoftNearestNeighbor(nn.Module):
+class SoftNearestNeighbor(nn.Module, ABC):
     def __init__(self, args, tau_min: float=0.1, tau_max: float=1.0):
         """
         Adaptive Soft Nearest Neighbor objective base class.
@@ -24,13 +25,14 @@ class SoftNearestNeighbor(nn.Module):
         # Temperatures range
         self.tau_min, self.tau_max = tau_min, tau_max
 
-    def __call__(self):
-        raise NotImplementedError("Base SNN class cannot be called.")
+    @abstractmethod
+    def __call__(self): pass
     
-    def _in_batch_scores(self, lidars: torch.Tensor, gds: torch.Tensor, angles: torch.Tensor):
+    def _lidar_dists(self, lidars: torch.Tensor):
         """
-        Compute in-batch negatives for anchors.
+        Compute in-batch lidar distances.
         """
+
         if not hasattr(self, 'mask_w') and hasattr(self, 'mask'):
             # Define LiDAR readings mask
             w = torch.zeros(size=(lidars.shape[1],))
@@ -60,6 +62,13 @@ class SoftNearestNeighbor(nn.Module):
         # Normalize distances to [0, 1]
         lid_dists /= self.norm
 
+        return lid_dists
+    
+    def _goal_diffs(self, gds: torch.Tensor, angles: torch.Tensor):
+        """
+        Compute in-batch position differences w.r.t. the goal.
+        """
+
         # Differences between in-batch anchors goal distances
         gd_diffs = torch.abs(gds.unsqueeze(0) - gds.unsqueeze(1))
 
@@ -67,13 +76,21 @@ class SoftNearestNeighbor(nn.Module):
         ori_diffs = ((angles.unsqueeze(0) - angles.unsqueeze(1)) + torch.pi) % (2 * torch.pi) - torch.pi
         ori_diffs = torch.abs(ori_diffs) / torch.pi
 
+        return gd_diffs * ori_diffs
+
+    
+    def _in_batch_scores(self, lidars: torch.Tensor, gds: torch.Tensor, angles: torch.Tensor):
+        """
+        Compute in-batch negative scores for anchors.
+        """
+
         # Distances between in-batch examples
         if self.metric == 'lidar':
-            batch_scores = lid_dists
+            batch_scores = self._lidar_dists(lidars)
         elif self.metric == 'goal':
-            batch_scores = gd_diffs * ori_diffs
+            batch_scores = self._goal_diffs(gds, angles)
         else:
-            batch_scores = lid_dists * gd_diffs * ori_diffs       
+            batch_scores = self._lidar_dists(lidars) *  self._goal_diffs(gds, angles)      
 
         return batch_scores
        
