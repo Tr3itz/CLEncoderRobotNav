@@ -10,6 +10,7 @@ import os
 import pickle
 import numpy as np
 import pandas as pd
+from scipy.spatial.distance import cdist
 from PIL import Image
 from multiprocessing import shared_memory  
 from glob import glob
@@ -25,6 +26,8 @@ class ContrastiveDataset(Dataset, ABC):
             mask: str,
             shift: float,  
             transforms: v2,
+            batch_size: int,
+            micro_bsize: int,
             augmentations: list=None,
             mode: str='train',
             multi_gpu: bool=False,
@@ -38,6 +41,8 @@ class ContrastiveDataset(Dataset, ABC):
         - metric: str         - metric for computing similarity (lidar, goal, both)
         - mask: str           - LiDAR readings mask type
         - transforms: v2      - image transformations to apply
+        - batch_size: int     - size of the batch returned by the DataLoader
+        - micro_bsize: int    - size of the micro-batch for gradient accumulation
         - augmentations       - augmentations for positive examples
         - mode: str           - dataset mode (train or val)
         - multi_gpu: bool     - whether the dataset is used for training a model on multiple GPUs
@@ -60,7 +65,12 @@ class ContrastiveDataset(Dataset, ABC):
         self.mode = mode
 
         # Distributed training
-        self.multi_gpu = multi_gpu            
+        self.multi_gpu = multi_gpu
+
+        # Batch and Micro-batch
+        assert micro_bsize == 0 or batch_size % micro_bsize == 0, f'Invalid micro-batch size: batch={batch_size}, micro-batch={micro_bsize}'
+        self.batch_size = batch_size
+        self.micro_bsize = micro_bsize if micro_bsize > 0 else batch_size            
 
         # Annotations dataframe
         assert os.path.exists(self.dir)
@@ -100,8 +110,8 @@ class ContrastiveDataset(Dataset, ABC):
                     w[63::-1] += sigmoid
                 
             # Mask and Normalizer    
-            self.mask = w
-            self.norm = np.sqrt(w.sum())
+            self.mask = w.astype(np.float32)
+            self.norm = np.sqrt(w.sum()).astype(np.float32)
 
     def __del__(self):
         if hasattr(self, '_shm'):
@@ -119,6 +129,12 @@ class ContrastiveDataset(Dataset, ABC):
         Create a global annotations file of the dataset.
         """
         pass
+
+    def _free_shm(self, rank):
+        if hasattr(self, '_shm'):
+            self._shm.close()
+            if rank == 0:
+                self._shm.unlink()
     
     def _opposite_corner(self, x: int | float, y: int | float) -> tuple[int]:
         """
@@ -144,7 +160,7 @@ class ContrastiveDataset(Dataset, ABC):
         goal_dist = np.sqrt((record['robot_pos_x']  - goal_x)**2 + (record['robot_pos_y']  - goal_y)**2)
         return goal_dist / max_gd
     
-    def _normalize_angle(self, angle: float):
+    def _normalize_angle(self, angle: float | np.ndarray):
         """
         Normalize angle in [-pi, pi]
         """
@@ -209,9 +225,71 @@ class ContrastiveDataset(Dataset, ABC):
         
         return sim_scores_mat
     
+    def _init_sim_matrix_vect(self, batch_size: int=1000):
+        if not self.multi_gpu: print(f"\nCOMPUTING {'TRAINING' if self.mode == 'train' else 'VALIDATION'} SIMILARITY SCORES MATRIX...")
+
+        print('Extracting LiDARs...')
+        # Extract all LiDAR scans
+        if self.metric in ['lidar', 'both']:
+            all_lidar_scans = np.vstack(
+                self.annot_df['laser_readings'].map(lambda x: x['scan'].squeeze()).to_numpy()
+            ).astype(np.float32)
+
+        print('Extracting goal info...')
+        # Extract all goal information 
+        if self.metric in ['goal', 'both']:
+            all_goal_distances = self.annot_df.apply(lambda x: self._goal_distance(x), axis=1).to_numpy().astype(np.float32)
+            all_relative_angles = self.annot_df.apply(lambda x: self._relative_angle(x), axis=1).to_numpy().astype(np.float32)
+
+        n_samples = self.annot_df.shape[0]
+        sim_scores_mat = np.ones((n_samples, n_samples), dtype=np.float32)
+
+        for i in tqdm(range(0, n_samples, batch_size), disable=self.multi_gpu, unit='rec'):
+            start, end = i, min(i + batch_size, n_samples)
+
+            # Default similarity values
+            lid_sim = 1.0
+            gd_sim = 1.0
+            ori_sim = 1.0
+
+            if self.metric in ['lidar', 'both']:
+                # Load batch
+                batch_scans = all_lidar_scans[start:end, :]
+
+                # Pair-wise weighted LiDAR distances
+                weighted_scans = all_lidar_scans * np.sqrt(self.mask)
+                weighted_batch = batch_scans * np.sqrt(self.mask)
+                lid_dist = cdist(weighted_batch, weighted_scans, metric='euclidean') / self.norm
+                
+                # Square matrix recontruction
+                # lid_dist_mat = squareform(condensed_dists) / self.norm
+                lid_sim = (1 - lid_dist)
+
+            if self.metric in ['goal', 'both']:
+                # Load batches
+                batch_gd = all_goal_distances[start:end]
+                batch_ori = all_relative_angles[start:end]
+
+                # Goal distance difference matrix
+                gd_mat = np.abs(batch_gd[:, np.newaxis] - all_goal_distances)
+                gd_sim = (1 - gd_mat)
+
+                # Goal orientation difference matrix
+                ori_diffs = batch_ori[:, np.newaxis] - all_relative_angles
+                ori_diff_mat = np.abs(self._normalize_angle(ori_diffs)) / np.pi
+                ori_sim = (1 - ori_diff_mat)
+
+            # Similarity scores matrix
+            batch_sim_scores = lid_sim * gd_sim * ori_sim
+            sim_scores_mat[start:end, :] = batch_sim_scores
+        
+        # Ensure the diagonal is 1 (similarity of an element with itself)
+        np.fill_diagonal(sim_scores_mat, 1.0)
+        return sim_scores_mat
+    
     def _shared_sim_mat(self):
         print([print(f"[GPU:{distr.get_rank()}] COMPUTING {'TRAINING' if self.mode == 'train' else 'VALIDATION'} SIMILARITY SCORES MATRIX...")])
-        sim_scores_mat = self._init_sim_matrix()
+        sim_scores_mat = self._init_sim_matrix_vect()
 
         # Matrix info 
         shape = sim_scores_mat.shape
@@ -221,11 +299,11 @@ class ContrastiveDataset(Dataset, ABC):
         print([print(f"[GPU:{distr.get_rank()}] Copying similarity scores matrix on shared memory...")])
         # Shared memory block creation
         try:
-            shm = shared_memory.SharedMemory(name='sim_scores_mat', create=True, size=size)
+            shm = shared_memory.SharedMemory(name=f'{self.mode}_sim_scores_mat', create=True, size=size)
             shared_mat = np.ndarray(shape=shape, dtype=dtype, buffer=shm.buf)
             shared_mat[:] = sim_scores_mat[:] # Copy on shared memory
         except FileExistsError:
-            shm = shared_memory.SharedMemory(name='sim_scores_mat', create=False)
+            shm = shared_memory.SharedMemory(name=f'{self.mode}_sim_scores_mat', create=False)
             shared_mat = np.ndarray(shape=shape, dtype=dtype, buffer=shm.buf)
 
         return shm, shared_mat
@@ -237,15 +315,16 @@ class ContrastiveDataset(Dataset, ABC):
         worker_seed = torch.initial_seed() % 2**32
         np.random.seed(worker_seed)
 
-    def get_DataLoader(self, batch_size: int, num_workers: int=None) -> DataLoader:
+    def get_DataLoader(self, num_workers: int=None) -> DataLoader:
         """ 
         Return the torch DataLoader of the dataset.
         """
         if self.multi_gpu:
-            batch_size = batch_size if self.mode == 'train' else batch_size // 2
+            self.batch_size = self.batch_size if self.mode == 'train' else self.batch_size // 2
+            self.micro_bsize = self.micro_bsize if self.mode == 'train' else self.micro_bsize // 2
             return DataLoader(
                 dataset=self,
-                batch_size=batch_size,
+                batch_size=self.batch_size,
                 num_workers=num_workers,
                 pin_memory=True,
                 drop_last=(self.mode == 'train'),
@@ -254,7 +333,7 @@ class ContrastiveDataset(Dataset, ABC):
         else:
             return DataLoader(
                 dataset=self,
-                batch_size=batch_size,
+                batch_size=self.batch_size,
                 shuffle=(self.mode == 'train'),
                 num_workers=num_workers,
                 worker_init_fn=self._seed_worker,
@@ -265,7 +344,7 @@ class ContrastiveDataset(Dataset, ABC):
     def set_shared_sim_mat(self):
         if not hasattr(self, 'sim_scores_mat'):
             try:
-                shm = shared_memory.SharedMemory(name='sim_scores_mat', create=False)
+                shm = shared_memory.SharedMemory(name=f'{self.mode}_sim_scores_mat', create=False)
                 self.sim_scores_mat = np.ndarray(shape=(self.annot_df.shape[0], self.annot_df.shape[0]), dtype=np.float32, buffer=shm.buf)
                 self._shm = shm
             except FileNotFoundError:
@@ -565,6 +644,7 @@ class RoomAllAgentsDataset(ContrastiveDataset):
     def __init__(
             self,
             dir: str,
+            algo: str,
             metric: str,
             mask: str,
             shift: float,
@@ -572,6 +652,8 @@ class RoomAllAgentsDataset(ContrastiveDataset):
             pos_thresh: float,
             n_neg: int,
             neg_thresh: float,
+            batch_size: int,
+            micro_bsize: int,
             val_room: int,
             transforms: v2,
             augmentations: list=None,
@@ -590,6 +672,8 @@ class RoomAllAgentsDataset(ContrastiveDataset):
         - pos_thresh: float   - positive similarity threshold
         - n_neg: int          - number of negative examples
         - neg_thresh: float   - negative similarity threshold
+        - batch_size: int     - size of the batch returned by the DataLoader
+        - micro_bsize: int    - size of the micro-batch for gradient accumulation
         - val_room: int       - validation room
         - transforms: v2      - image transformations to apply
         - augmentations       - additional augmentations for positive examples
@@ -603,19 +687,33 @@ class RoomAllAgentsDataset(ContrastiveDataset):
             mask=mask,
             shift=shift,
             transforms=transforms,
+            batch_size=batch_size,
+            micro_bsize=micro_bsize,
             augmentations=augmentations,
             mode=mode,
             multi_gpu=multi_gpu,
             seed=seed
         )
+        # Algorithm
+        assert algo in ['classic', 'scene-transfer']
+        self.algo = algo
 
-        # Positive examples
-        self.n_pos = n_pos
-        self.pos_thresh = pos_thresh
-        
-        # Negative examples
-        self.n_neg = n_neg
-        self.neg_thresh = neg_thresh
+        if self.algo == 'scene-transfer':
+            assert n_pos > 0 and n_neg > 0, 'Scene transfer network with no examples.'
+            
+            # Scenes partitions
+            self.SCENES = {
+                'train': [2, 3, 4, 5, 6],
+                'val': [1, 7]
+            }
+
+            # Positive examples
+            self.n_pos = n_pos
+            self.pos_thresh = pos_thresh
+            
+            # Negative examples
+            self.n_neg = n_neg
+            self.neg_thresh = neg_thresh
 
         # Annotations
         assert val_room in self.annot_df['room'].unique()
@@ -626,16 +724,27 @@ class RoomAllAgentsDataset(ContrastiveDataset):
         self.annot_df.reset_index(inplace=True, drop=True)
 
         # Initialize similarity matrix
-        if self.mode == 'val':
+        if self.mode == 'val' or self.algo == 'scene-transfer':
             if self.multi_gpu:
                 if distr.get_rank() == 0:
                     self._shm, self.sim_scores_mat = self._shared_sim_mat()
                     self.sim_scores_range = self.sim_scores_mat.max() - self.sim_scores_mat.min()
             else:   
-                self.sim_scores_mat = self._init_sim_matrix()
+                self.sim_scores_mat = self._init_sim_matrix_vect()
                 self.sim_scores_range = self.sim_scores_mat.max() - self.sim_scores_mat.min()
 
     def __getitem__(self, idx: int):
+        if self.algo == 'classic':
+            return self._classic_partition(idx)
+        else:
+            return self._scene_transfer_partition(idx)
+    
+    def _classic_partition(self, idx: int):
+        """
+        Partition the dataset in anchors and positive examples
+        following the classic Contrastive Learning approach. 
+        """
+
         # Retrieve image location from the annotations dataframe 
         record = self.annot_df.iloc[idx]
         R = record['room']
@@ -656,66 +765,89 @@ class RoomAllAgentsDataset(ContrastiveDataset):
         # Retrieve additional information for the anchor
         anc_lidar, anc_gd, anc_phi = self._info(record=record)
 
-        if self.n_pos > 0:
-            # Load positive examples from any other episode
-            df = self.annot_df[
-                (self.annot_df['setting'] != S) |
-                (self.annot_df['agent'] != agent) |
-                (self.annot_df['episode'] != ep)         
-            ].copy()
-            df.reset_index(inplace=True, drop=True)
-
-            # Similarity scores
-            sim_scores = np.ones(shape=(df.shape[0],))          
-
-            for i in df.index:
-                lidar, gd, phi = self._info(i)
-                sim_scores[i] *= self._sim(lidars=[anc_lidar, lidar], gds=[anc_gd, gd], angles=[anc_phi, phi])
-
-            # Find enough negative examples to sample from 
-            cur_thresh = self.pos_thresh
-            pos_recs = df[sim_scores >= cur_thresh]
-            while pos_recs.shape[0] < self.n_pos*2:
-                cur_thresh -= 0.01
-                pos_recs = df[sim_scores >= cur_thresh]
-
-            # Sample n_pos negative examples from all samples with score above the threshold
-            pos_recs = pos_recs.sample(n=self.n_pos, random_state=self.seed)
-            pos_ex = torch.cat([pos_ex, self._load(pos_recs)])
-            pos_sim_scores = np.concat([pos_sim_scores, sim_scores[pos_recs.index]])          
-        
-        if self.n_neg > 0:
-            # Load negative examples from the same setting of the room
-            df = self.annot_df[
-                (self.annot_df['setting'] == S) &   
-                ((self.annot_df['agent'] != agent) | (self.annot_df['episode'] != ep))         
-            ].copy()
-            df.reset_index(inplace=True, drop=True)
-
-            # Similarity scores
-            sim_scores = np.ones(shape=(df.shape[0],))          
-
-            for i in df.index:
-                lidar, gd, phi = self._info(i)
-                sim_scores[i] *= self._sim(lidars=[anc_lidar, lidar], gds=[anc_gd, gd], angles=[anc_phi, phi])
-
-            # Find enough negative examples to sample from 
-            cur_thresh = self.neg_thresh
-            neg_recs = df[sim_scores <= cur_thresh]
-            while neg_recs.shape[0] < self.n_neg*2:
-                cur_thresh += 0.01
-                neg_recs = df[sim_scores <= cur_thresh]
-
-            # Sample n_neg negative examples from all samples with score below the threshold
-            neg_recs = neg_recs.sample(n=self.n_neg, random_state=self.seed)
-            neg_ex = self._load(neg_recs)
-            neg_sim_scores = sim_scores[neg_recs.index]
-
-            # Return both anchors and respective positive/negative partitions
-            return anchor, pos_ex, pos_sim_scores, neg_ex, neg_sim_scores
-
         # Return additional information to the anchor for in-batch similarities
         return anchor, pos_ex, pos_sim_scores, anc_lidar, anc_gd, anc_phi
+    
+    def _scene_transfer_partition(self, idx: int):
+        """
+        Partition the dataset in anchors, positive examples and negative examples
+        following a scene-transfer Constrastive Learning approach: both anchors and 
+        examples will belong to a random scene.
+        """
+
+        # Retrieve image location from the annotations dataframe 
+        record = self.annot_df.iloc[idx]
+        R = record['room']
+        S = record['setting']
+        agent = record['agent']
+        ep = record['episode']
+        step = record['step']
+        
+        # Load anchor image from `augmented_results`
+        scene = np.random.choice(self.SCENES[self.mode]).item() 
+        img = Image.open(f'{self.dir}/Room{R}/Setting{S}/{agent}/episode_{ep:04}/augmented_results/aug{scene}_rgb_{step:05}.png')
+        anchor = self.transforms(img)
+
+        temp_df = self.annot_df.drop(index=idx).reset_index()
+        sim_scores = np.concatenate([self.sim_scores_mat[idx, :idx], self.sim_scores_mat[idx, idx+1:]])
+
+        # Load positive examples from any other episode
+        # pos_df = self.annot_df[
+        #     (self.annot_df['setting'] != S) |
+        #     (self.annot_df['agent'] != agent) |
+        #     (self.annot_df['episode'] != ep)         
+        # ].copy()
+
+        # Similarity scores
+        # pos_sim_scores = sim_scores[pos_df.index]
+        # pos_df.reset_index(inplace=True, drop=True)
+
+        # Find enough negative examples to sample from 
+        # cur_thresh = self.pos_thresh
+        # pos_recs = temp_df[sim_scores >= cur_thresh]
+        # while pos_recs.shape[0] < self.n_pos*2:
+        #     cur_thresh -= 0.01
+        #     pos_recs = temp_df[sim_scores >= cur_thresh]
+
+        # Sample n_pos negative examples from all samples with score above the threshold
+        pos_recs = temp_df[sim_scores >= self.pos_thresh]
+        pos_recs = pos_recs.sample(n=self.n_pos, random_state=self.seed, replace=True)
+        pos_ex = self._load(pos_recs)
+        pos_sim_scores = sim_scores[pos_recs.index]
+
+        # Load negative examples from the same setting of the room
+        # neg_df = self.annot_df[
+        #     (self.annot_df['setting'] == S) &   
+        #     ((self.annot_df['agent'] != agent) | (self.annot_df['episode'] != ep))         
+        # ].copy()
+        # neg_df.reset_index(inplace=True, drop=True)
+
+        # Similarity scores
+        # neg_sim_scores = sim_scores[neg_df.index]
+
+        # Find enough negative examples to sample from 
+        # cur_thresh = self.neg_thresh
+        # neg_recs = temp_df[sim_scores <= cur_thresh]
+        # while neg_recs.shape[0] < self.n_neg*2:
+        #     cur_thresh += 0.01
+        #     neg_recs = temp_df[sim_scores <= cur_thresh]
+
+        # Sample n_neg negative examples from all samples with score below the threshold
+        neg_recs = temp_df[sim_scores <= self.neg_thresh]
+        neg_recs = neg_recs.sample(n=self.n_neg, random_state=self.seed, replace=True)
+        neg_ex = self._load(neg_recs)
+        neg_sim_scores = sim_scores[neg_recs.index]
+
+        if self.mode == 'val':
+            scene1 = Image.open(f'{self.dir}/Room{R}/Setting{S}/{agent}/episode_{ep:04}/augmented_results/aug2_rgb_{step:05}.png')
+            scene1 = self.transforms(scene1)
+            scenes = torch.stack([scene1] + self._augs(record))
+
+            # In validation return all different scenes for visualziation
+            return anchor, scenes, pos_ex, pos_sim_scores, neg_ex, neg_sim_scores
+        
+        # Return both anchors and respective positive/negative partitions
+        return anchor, pos_ex, pos_sim_scores, neg_ex, neg_sim_scores
     
     def _annot(self):
         """
@@ -866,7 +998,8 @@ class RoomAllAgentsDataset(ContrastiveDataset):
             rec_ep = rec['episode']
             rec_step = rec['step']
 
-            ex_img = Image.open(f'{self.dir}/Room{rec_r}/Setting{rec_s}/{rec_agent}/episode_{rec_ep:04}/augmented_results/aug2_rgb_{rec_step:05}.png')
+            scene = np.random.choice(self.SCENES[self.mode]).item() if self.algo == 'scene-trasnfer' else 2 
+            ex_img = Image.open(f'{self.dir}/Room{rec_r}/Setting{rec_s}/{rec_agent}/episode_{rec_ep:04}/augmented_results/aug{scene}_rgb_{rec_step:05}.png')
             examples.append(self.transforms(ex_img))
 
         return torch.stack(examples)
