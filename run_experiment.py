@@ -79,6 +79,7 @@ def get_dataset(args) -> tuple[RoomAllAgentsDataset]:
     # Training dataset
     train_dataset = RoomAllAgentsDataset(
         dir=f'{args.datasets_path}/{args.dataset}',
+        algo=args.algo,
         val_room=args.val_room,
         metric=args.metric,
         mask=args.mask,
@@ -87,6 +88,8 @@ def get_dataset(args) -> tuple[RoomAllAgentsDataset]:
         pos_thresh=args.pos_thresh,
         n_neg=args.n_neg,
         neg_thresh=args.neg_thresh,
+        batch_size=args.batch_size,
+        micro_bsize=args.micro_bsize,
         transforms=transforms,
         augmentations=augmentations,
         mode='train',
@@ -96,6 +99,7 @@ def get_dataset(args) -> tuple[RoomAllAgentsDataset]:
     # Validation dataset
     val_dataset = RoomAllAgentsDataset(
         dir=f'{args.datasets_path}/{args.dataset}',
+        algo=args.algo,
         val_room=args.val_room,
         metric=args.metric,
         mask=args.mask,
@@ -104,6 +108,8 @@ def get_dataset(args) -> tuple[RoomAllAgentsDataset]:
         pos_thresh=args.pos_thresh,
         n_neg=args.n_neg,
         neg_thresh=args.neg_thresh,
+        batch_size=args.batch_size,
+        micro_bsize=args.micro_bsize,
         transforms=transforms,
         augmentations=augmentations,
         mode='val',
@@ -164,6 +170,11 @@ def main_multi_gpu(rank: int, world_size: int, exp_dir: str, figs_dir: str, args
         if rank > 0:
             print(f"[GPU:{rank}] Retrieving shared similarity scores matrix...")
             val_ds.set_shared_sim_mat()
+            if args.algo == 'scene-transfer':
+                train_ds.set_shared_sim_mat()
+
+        # Barrier synchronizazion
+        distr.barrier(device_ids=[rank])
 
         print(f"[GPU:{rank}] Building trainer...")
         # Trainer
@@ -185,6 +196,13 @@ def main_multi_gpu(rank: int, world_size: int, exp_dir: str, figs_dir: str, args
 
         # Train
         trainer.train()
+
+        # Free shared memory
+        val_ds._free_shm(rank=rank)
+        if args.algo == 'scene-transfer':
+            train_ds._free_shm(rank=rank)
+        
+        # End distributed training
         destroy_process_group()
 
     except Exception as e:
@@ -205,9 +223,9 @@ if __name__ == '__main__':
 
     # Create directories of the experiment
     now = datetime.now().strftime('%d-%m-%Y_%H:%M:%S')
-    exp_dir = f"./experiments/{'sampled' if args.n_neg > 0 else 'batch'}/{now}"  
+    exp_dir = f"./experiments/{args.algo}/{now}"  
     figs_dir = f'{exp_dir}/val_figs'
-    os.makedirs(figs_dir)
+    os.makedirs(figs_dir, exist_ok=True)
 
     # Save the configuration
     conf.save_yaml(dir=exp_dir)
