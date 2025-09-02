@@ -175,6 +175,10 @@ class SNNCosineSimilarityLoss(SoftNearestNeighbor):
         return batch_sims.sum(dim=1)
 
 
+class SNNSimCLR(SoftNearestNeighbor):
+    pass
+
+
 class SNNEucledianDistanceLoss(SoftNearestNeighbor):
     def __init__(self, args, tau_min: float=0.1, tau_max: float=1.0):
         """
