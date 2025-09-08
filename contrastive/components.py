@@ -174,9 +174,62 @@ class SNNCosineSimilarityLoss(SoftNearestNeighbor):
 
         return batch_sims.sum(dim=1)
 
-
+ 
 class SNNSimCLR(SoftNearestNeighbor):
-    pass
+    def __init__(self, args, tau_min: float=0.1, tau_max: float=1.0):
+        """
+        SNN objective based on SimCLR framework.
+        """
+        super().__init__(
+            args=args,
+            tau_min=tau_min,
+            tau_max=tau_max
+        )
+
+    def __call__(
+            self,
+            anc_batch: torch.Tensor, 
+            pos_batch: torch.Tensor,
+            pos_sim_scores: torch.Tensor, 
+            lidars: torch.Tensor, 
+            gds: torch.Tensor, 
+            angles: torch.Tensor
+        ):
+
+        # Compute overall similarity matrix
+        features = torch.cat([anc_batch, pos_batch], dim=0)        
+        sim_mat = F.cosine_similarity(features.unsqueeze(0), features.unsqueeze(1), dim=2)        
+
+        # Retrieve dimensions
+        B = anc_batch.shape[0] # Batch size
+        N = features.shape[0]  # 2 * Batch size
+
+        # Similarity masks
+        device = features.device
+        mask = ~torch.eye(N, dtype=bool, device=device)
+        labels = torch.arange(B, device=device).repeat(2)
+        pos_mask = (labels.unsqueeze(0) == labels.unsqueeze(1)) & mask
+        neg_mask = (labels.unsqueeze(0)!= labels.unsqueeze(1))
+
+        # Positive and negative similarities
+        pos_sims = sim_mat[pos_mask].view(N, 1)
+        neg_sims = sim_mat[neg_mask].view(N, -1)
+
+        # In-batch negative scores
+        batch_tau = self._in_batch_scores(lidars, gds, angles)
+        batch_tau_mat = batch_tau.repeat(2, 2)
+        batch_tau_mat = batch_tau_mat[neg_mask].view(N, -1)
+        batch_tau_mat = self.tau_min + (self.tau_max - self.tau_min)*(1-batch_tau_mat)
+        
+        # Adaptive temperature scaling
+        pos_logits = pos_sims / self.tau_min
+        neg_logits = neg_sims / batch_tau_mat
+
+        # Loss computation
+        logits = torch.cat([pos_logits, neg_logits], dim=1)
+        ce_labels = torch.zeros(N, dtype=torch.long, device=device)
+        
+        return F.cross_entropy(logits, ce_labels)
 
 
 class SNNEucledianDistanceLoss(SoftNearestNeighbor):
