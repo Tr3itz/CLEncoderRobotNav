@@ -16,11 +16,11 @@ MODEL = {
     'resnet50': ResNetEncoder,
     'mbnv3': MobileNetV3Encoder
 }
-from contrastive.components import SNNCosineSimilarityLoss, SNNEucledianDistanceLoss, SNNManhattanDistanceLoss
+from contrastive.components import SNNCosineSimilarityLoss, SNNSimCLR
 LOSS_FN = {
-    'sim': SNNCosineSimilarityLoss,
-    'l1': SNNManhattanDistanceLoss,
-    'l2': SNNEucledianDistanceLoss
+    'classic': SNNCosineSimilarityLoss,
+    'scene-transfer': SNNCosineSimilarityLoss,
+    'simclr': SNNSimCLR
 }
 
 # Utils
@@ -125,7 +125,7 @@ def load_components(args):
 
     # Model, Loss and Optimizer
     model = MODEL[args.model]()
-    loss_fn = LOSS_FN[args.loss](
+    loss_fn = LOSS_FN[args.algo](
         args=args,
         tau_min=args.min_tau,
         tau_max=args.max_tau
@@ -215,11 +215,11 @@ def main_multi_gpu(rank: int, world_size: int, exp_dir: str, figs_dir: str, args
 
 
 if __name__ == '__main__':
-    print(f'{"-"*30}\nContrastive Scene Transfer Encoder training experiment!')
-
     # Configurations
     conf = Configurations()
     args = conf.get_args()
+
+    print(f'{"-"*30}\nContrastive Scene Transfer Encoder training experiment! (Framework: {args.algo})')
 
     # Create directories of the experiment
     now = datetime.now().strftime('%d-%m-%Y_%H:%M:%S')
