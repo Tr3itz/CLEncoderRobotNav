@@ -307,13 +307,6 @@ class ContrastiveDataset(Dataset, ABC):
             shared_mat = np.ndarray(shape=shape, dtype=dtype, buffer=shm.buf)
 
         return shm, shared_mat
-    
-    def _seed_worker(self, worker_id):
-        """
-        Set the random seed for each worker.
-        """
-        worker_seed = torch.initial_seed() % 2**32
-        np.random.seed(worker_seed)
 
     def get_DataLoader(self, num_workers: int=None) -> DataLoader:
         """ 
@@ -334,7 +327,6 @@ class ContrastiveDataset(Dataset, ABC):
                 batch_size=self.batch_size,
                 shuffle=(self.mode == 'train'),
                 num_workers=num_workers,
-                worker_init_fn=self._seed_worker,
                 pin_memory=True,
                 drop_last=(self.mode == 'train'),
             )
