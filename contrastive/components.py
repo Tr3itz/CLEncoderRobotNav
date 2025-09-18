@@ -3,6 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from abc import ABC, abstractmethod
 
+""" TODO
+Make SimCLR loss general so that it implements general adaptive temperatures,
+using a specific function on specific information.
+"""
 
 class SoftNearestNeighbor(nn.Module, ABC):
     def __init__(self, args, tau_min: float=0.1, tau_max: float=1.0):

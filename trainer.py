@@ -9,14 +9,9 @@ import torch.distributed as distr
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 # Contrastive imports
-from contrastive.datasets import ContrastiveDataset, RoomAllAgentsDataset
+from contrastive.datasets import ContrastiveDataset
 from contrastive.encoder import ResNetEncoder
-from contrastive.components import SoftNearestNeighbor, SNNCosineSimilarityLoss, SNNEucledianDistanceLoss, SNNManhattanDistanceLoss
-LOSS_FN = {
-    'sim': SNNCosineSimilarityLoss,
-    'l1': SNNManhattanDistanceLoss,
-    'l2': SNNEucledianDistanceLoss
-}
+from contrastive.components import SoftNearestNeighbor
 
 # Utils
 import os, gc

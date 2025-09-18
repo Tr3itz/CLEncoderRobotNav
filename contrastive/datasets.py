@@ -97,7 +97,7 @@ class ContrastiveDataset(Dataset, ABC):
             with open(f'{self.dir}/annotations.pkl', 'rb') as f:
                 self.annot_df = pickle.load(f)
         except FileNotFoundError:
-            print(f"{'Creating annotations file...' if self.multi_gpu else f'[GPU:{distr.get_rank()}] Retrieving additional info...'}")
+            print(f"{'Creating annotations file...' if not self.multi_gpu else f'[GPU:{distr.get_rank()}] Retrieving additional info...'}")
             self.annot_df = self._annot()
 
         # Pandas methods will be used on this dataframe

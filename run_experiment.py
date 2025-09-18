@@ -219,7 +219,7 @@ if __name__ == '__main__':
     print(f'{"-"*30}\nContrastive Scene Transfer Encoder training experiment! (Framework: {args.algo})')
 
     # Create directories of the experiment
-    now = datetime.now().strftime('%d-%m-%Y_%H:%M:%S')
+    now = datetime.now().strftime('%d-%m-%Y_%H-%M-%S')
     exp_dir = f"./experiments/{args.algo}/{now}"  
     figs_dir = f'{exp_dir}/val_figs'
     os.makedirs(figs_dir, exist_ok=True)
