@@ -18,7 +18,6 @@ MODEL = {
 }
 from contrastive.components import SNNCosineSimilarityLoss, SNNSimCLR
 LOSS_FN = {
-    'classic': SNNCosineSimilarityLoss,
     'scene-transfer': SNNCosineSimilarityLoss,
     'simclr': SNNSimCLR
 }
@@ -26,8 +25,6 @@ LOSS_FN = {
 # Utils
 import os
 import traceback
-import numpy as np
-from multiprocessing import shared_memory
 from datetime import datetime
 from configurations import Configurations
 

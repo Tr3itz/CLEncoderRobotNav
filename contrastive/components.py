@@ -111,11 +111,8 @@ class SNNCosineSimilarityLoss(SoftNearestNeighbor):
             anc_batch: torch.Tensor, 
             pos_batch: torch.Tensor,
             pos_sim_scores: torch.Tensor, 
-            lidars: torch.Tensor=None, 
-            gds: torch.Tensor=None, 
-            angles: torch.Tensor=None,
-            neg_batch: torch.Tensor=None, 
-            neg_sim_scores: torch.Tensor=None
+            neg_batch: torch.Tensor, 
+            neg_sim_scores: torch.Tensor
         ):
         """
         New implementation maps similarities/distances in [tau_min, tau_max]:
@@ -129,44 +126,19 @@ class SNNCosineSimilarityLoss(SoftNearestNeighbor):
         pos_sims = F.cosine_similarity(anc_batch.unsqueeze(1), pos_batch, dim=-1)
         pos_tau = self.tau_min + (self.tau_max - self.tau_min) * (1-pos_sim_scores)
         pos_sims = torch.exp(pos_sims / pos_tau)  # removed '-' in front of similarity
+        
+        # Embedding similarities between anchors and positive examples
+        neg_sims = F.cosine_similarity(anc_batch.unsqueeze(1), neg_batch, dim=-1)
+        # Adaptive temperatures
+        neg_tau = self.tau_min + (self.tau_max - self.tau_min) * (1-neg_sim_scores)
+        neg_sims = torch.exp(neg_sims / neg_tau)  # removed '-' in front of similarity
 
-        if neg_batch is not None:
-            # Embedding similarities between anchors and positive examples
-            neg_sims = F.cosine_similarity(anc_batch.unsqueeze(1), neg_batch, dim=-1)
-            # Adaptive temperatures
-            neg_tau = self.tau_min + (self.tau_max - self.tau_min) * (1-neg_sim_scores)
-            neg_sims = torch.exp(neg_sims / neg_tau)  # removed '-' in front of similarity
-
-            # Compute SNN loss with sampled negative examples
-            num = pos_sims.sum(dim=1)
-            den = torch.cat([pos_sims, neg_sims], dim=1).sum(dim=1)
-            snn = -torch.log(num / den)
-        else:
-            # Compute SNN loss with in-batch negative examples
-            num = pos_sims.sum(dim=1)
-            den = self._in_batch_negatives(anc_batch, lidars, gds, angles)
-            snn = -torch.log(num / (num + den))
+        # Compute SNN loss with sampled negative examples
+        num = pos_sims.sum(dim=1)
+        den = torch.cat([pos_sims, neg_sims], dim=1).sum(dim=1)
+        snn = -torch.log(num / den)
 
         return snn.mean()
-    
-    def _in_batch_negatives(self, anc_batch, lidars, gds, angles):
-        # In-batch distance scores
-        batch_scores = self._in_batch_scores(lidars, gds, angles)
-
-        # Embedding similarities between anchors and in-batch negative examples
-        batch_sims = F.cosine_similarity(anc_batch.unsqueeze(1), anc_batch.unsqueeze(0), dim=2)
-
-        # Mask out self-similarities
-        B = anc_batch.shape[0]
-        mask = ~torch.eye(B, device=anc_batch.device, dtype=torch.bool)
-        batch_sims = batch_sims[mask].view(B, B-1)
-        batch_scores = batch_scores[mask].view(B, B-1)
-
-        # Adaptive temperatures
-        batch_tau = self.tau_min + (self.tau_max - self.tau_min)*batch_scores
-        batch_sims = torch.exp(batch_sims / batch_tau)  # removed '-' in front of similarity
-
-        return batch_sims.sum(dim=1)
 
  
 class SNNSimCLR(SoftNearestNeighbor):

@@ -396,7 +396,7 @@ class RoomAllAgentsDataset(ContrastiveDataset):
             seed=seed
         )
         # Algorithm
-        assert algo in ['classic', 'simclr', 'scene-transfer']
+        assert algo in ['simclr', 'scene-transfer'], f'Unknown framework {algo}. Must be either `simclr` or `scene-transfer`!'
         self.algo = algo
 
         if self.algo != 'classic':
@@ -435,9 +435,7 @@ class RoomAllAgentsDataset(ContrastiveDataset):
                 self.sim_scores_range = self.sim_scores_mat.max() - self.sim_scores_mat.min()
 
     def __getitem__(self, idx: int):
-        if self.algo == 'classic':
-            return self._classic_partition(idx)
-        elif self.algo == 'simclr':
+        if self.algo == 'simclr':
             return self._simclr_partition(idx)
         else:
             return self._scene_transfer_partition(idx)
