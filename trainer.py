@@ -85,7 +85,7 @@ class ContrastiveTrainer(ABC):
         fig.savefig(f'{self.figs_dir}/epoch_{epoch + 1}.png', format='png')
         plt.close(fig)
 
-    def _intra_consistency(self, embeddings: torch.Tensor, fig: Figure, n_bins: int=20):
+    def _intra_consistency(self, embeddings: torch.Tensor, fig: Figure, n_bins: int=20): # TODO: change to 10 bins
         print('Intra-scene consistency visualization...')
 
         # Inter-scene consistency
@@ -103,7 +103,7 @@ class ContrastiveTrainer(ABC):
             # Measure the embedding similarity between the anchor and the sorted embeddings 
             embedding_sims = F.cosine_similarity(anc_embedding, sorted_embeddings)
             for j, sim in enumerate(embedding_sims):
-                bin = int((1.0-score[j].item()) / bin_tol)
+                bin = int((1.0-sorted_scores[j].item()) / bin_tol)
                 if bin == len(bins): 
                     bins[-1].append(sim.item())
                 else:
@@ -332,7 +332,7 @@ class SingleGPUTrainer(ContrastiveTrainer):
                     b_neg_sim_scores = neg_sim_scores[start:end, ...].to(self.device)
 
                     # Adaptive Contrastive Loss
-                    loss = self.loss_fn(anc_embeddings, pos_embeddings, b_pos_sim_scores, neg_batch=neg_embeddings, b_neg_sim_scores=neg_sim_scores)
+                    loss = self.loss_fn(anc_embeddings, pos_embeddings, b_pos_sim_scores, neg_batch=neg_embeddings, neg_sim_scores=b_neg_sim_scores)
 
                     # Move back on the CPU and free space
                     del anc_embeddings, pos_embeddings, b_pos_sim_scores, \
@@ -373,7 +373,9 @@ class SingleGPUTrainer(ContrastiveTrainer):
                 
                 # Unpack data
                 if self.val_ds.algo == 'scene-transfer':
-                    anchors, scenes, pos_ex, pos_sim_scores, neg_ex, neg_sim_scores = data       
+                    anchors, scenes, pos_ex, pos_sim_scores, neg_ex, neg_sim_scores = data
+                elif self.val_ds.algo == 'simclr':
+                    anchors, scenes, pos_ex, pos_sim_scores, lidars, gds, angles = data       
                 else:
                     anchors, pos_ex, pos_sim_scores, lidars, gds, angles = data
 
@@ -391,9 +393,11 @@ class SingleGPUTrainer(ContrastiveTrainer):
                         # Generate embeddings of postive examples
                         pos_embeddings = self._forward_and_clear(x=pos_ex[start:end, ...])
 
-                        if self.val_ds.algo == 'scene-transfer':
+                        if self.val_ds.algo != 'classic':
                             # Generate embeddings of scenes
                             scene_embeddings = self._forward_and_clear(x=scenes[start:end, ...])
+
+                        if self.val_ds.algo == 'scene-transfer':
                             # Generate embeddings of negative examples
                             neg_embeddings = self._forward_and_clear(x=neg_ex[start:end, ...])
 
@@ -414,13 +418,16 @@ class SingleGPUTrainer(ContrastiveTrainer):
                             b_lidars, b_gds, b_angles = lidars[start:end, ...].to(self.device), gds[start:end, ...].to(self.device), angles[start:end, ...].to(self.device)
 
                             # Adaptive Contrastive Loss (consider only hold-out augmentations)
-                            loss = self.loss_fn(anc_embeddings, pos_embeddings[:, 5:, ...], b_pos_sim_scores[:, 5:], lidars=b_lidars, gds=b_gds, angles=b_angles).detach().item()
+                            if self.val_ds.algo == 'simclr':
+                                loss = self.loss_fn(anc_embeddings, pos_embeddings, b_pos_sim_scores, lidars=b_lidars, gds=b_gds, angles=b_angles).detach().item()
+                            else:
+                                loss = self.loss_fn(anc_embeddings, pos_embeddings[:, 5:, ...], b_pos_sim_scores[:, 5:], lidars=b_lidars, gds=b_gds, angles=b_angles).detach().item()
                             running_loss += loss / accumulation_steps
 
                             # Free space
                             del b_pos_sim_scores, b_lidars, b_gds, b_angles                
                     
-                    if self.val_ds.algo == 'scene-transfer':
+                    if self.val_ds.algo != 'classic':
                         # Move back to the CPU
                         scene_embeddings = scene_embeddings.cpu()
 
@@ -621,7 +628,7 @@ class MultiGPUTrainer(ContrastiveTrainer):
                     b_neg_sim_scores = neg_sim_scores[start:end, ...].to(self.device)
 
                     # Adaptive Contrastive Loss
-                    loss = self.loss_fn(anc_embeddings, pos_embeddings, b_pos_sim_scores, neg_batch=neg_embeddings, b_neg_sim_scores=neg_sim_scores)
+                    loss = self.loss_fn(anc_embeddings, pos_embeddings, b_pos_sim_scores, neg_batch=neg_embeddings, neg_sim_scores=b_neg_sim_scores)
 
                     # Move back on the CPU and free space
                     del anc_embeddings, pos_embeddings, b_pos_sim_scores, \
@@ -663,7 +670,9 @@ class MultiGPUTrainer(ContrastiveTrainer):
                 
                 # Unpack data
                 if self.train_ds.algo == 'scene-transfer':
-                    anchors, scenes, pos_ex, pos_sim_scores, neg_ex, neg_sim_scores = data       
+                    anchors, scenes, pos_ex, pos_sim_scores, neg_ex, neg_sim_scores = data
+                elif self.train_ds.algo == 'simclr':
+                    anchors, scenes, pos_ex, pos_sim_scores, lidars, gds, angles = data        
                 else:
                     anchors, pos_ex, pos_sim_scores, lidars, gds, angles = data
 
@@ -681,9 +690,11 @@ class MultiGPUTrainer(ContrastiveTrainer):
                         # Generate embeddings of postive examples
                         pos_embeddings = self._forward_and_clear(x=pos_ex[start:end, ...])
 
-                        if self.val_ds.algo == 'scene-transfer':
+                        if self.val_ds.algo != 'classic':
                             # Generate embeddings of scenes
                             scene_embeddings = self._forward_and_clear(x=scenes[start:end, ...])
+
+                        if self.val_ds.algo == 'scene-transfer':
                             # Generate embeddings of negative examples
                             neg_embeddings = self._forward_and_clear(x=neg_ex[start:end, ...])
 
@@ -704,7 +715,10 @@ class MultiGPUTrainer(ContrastiveTrainer):
                             b_lidars, b_gds, b_angles = lidars[start:end, ...].to(self.device), gds[start:end, ...].to(self.device), angles[start:end, ...].to(self.device)
 
                             # Adaptive Contrastive Loss (consider only hold-out augmentations)
-                            loss = self.loss_fn(anc_embeddings, pos_embeddings[:, 5:, ...], b_pos_sim_scores[:, 5:], lidars=b_lidars, gds=b_gds, angles=b_angles).detach().cpu()
+                            if self.val_ds.algo == 'simclr':
+                                loss = self.loss_fn(anc_embeddings, pos_embeddings, b_pos_sim_scores, lidars=b_lidars, gds=b_gds, angles=b_angles).detach().cpu()
+                            else:
+                                loss = self.loss_fn(anc_embeddings, pos_embeddings[:, 5:, ...], b_pos_sim_scores[:, 5:], lidars=b_lidars, gds=b_gds, angles=b_angles).detach().cpu()
                             running_loss += loss / accumulation_steps
 
                             # Free space

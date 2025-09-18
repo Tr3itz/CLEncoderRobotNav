@@ -320,8 +320,6 @@ class ContrastiveDataset(Dataset, ABC):
         Return the torch DataLoader of the dataset.
         """
         if self.multi_gpu:
-            self.batch_size = self.batch_size if self.mode == 'train' else self.batch_size // 2
-            self.micro_bsize = self.micro_bsize if self.mode == 'train' else self.micro_bsize // 2
             return DataLoader(
                 dataset=self,
                 batch_size=self.batch_size,
@@ -695,16 +693,16 @@ class RoomAllAgentsDataset(ContrastiveDataset):
             seed=seed
         )
         # Algorithm
-        assert algo in ['classic', 'scene-transfer']
+        assert algo in ['classic', 'simclr', 'scene-transfer']
         self.algo = algo
 
-        if self.algo == 'scene-transfer':
-            assert n_pos > 0 and n_neg > 0, 'Scene transfer network with no examples.'
+        if self.algo != 'classic':
+            # assert n_pos > 0 and n_neg > 0, 'Scene transfer network with no examples.'
             
             # Scenes partitions
             self.SCENES = {
-                'train': [2, 3, 4, 5, 6],
-                'val': [1, 7]
+                'train': [3, 4, 5, 6],
+                'val': [1, 2, 7]
             }
 
             # Positive examples
@@ -736,6 +734,8 @@ class RoomAllAgentsDataset(ContrastiveDataset):
     def __getitem__(self, idx: int):
         if self.algo == 'classic':
             return self._classic_partition(idx)
+        elif self.algo == 'simclr':
+            return self._simclr_partition(idx)
         else:
             return self._scene_transfer_partition(idx)
     
@@ -767,6 +767,53 @@ class RoomAllAgentsDataset(ContrastiveDataset):
 
         # Return additional information to the anchor for in-batch similarities
         return anchor, pos_ex, pos_sim_scores, anc_lidar, anc_gd, anc_phi
+    
+    def _simclr_partition(self, idx: int, penalty: float=0.3):
+        """
+        Partition the dataset in anchors and positive examples with both
+        belonging to a random scene similar to SimCLR.
+        """
+
+        # Retrieve image location from the annotations dataframe 
+        record = self.annot_df.iloc[idx]
+        R = record['room']
+        S = record['setting']
+        agent = record['agent']
+        ep = record['episode']
+        step = record['step']        
+        
+        # Select the anchor scene uniformly 
+        scenes = self.SCENES[self.mode]
+        n = len(scenes)
+        anchor_scene = np.random.choice(scenes).item()
+        
+        # Select the positive scene with a weighted distribution
+        probs = np.ones(n)
+        probs[scenes.index(anchor_scene)] = penalty
+        probs /= probs.sum() 
+        pos_scene = np.random.choice(scenes, p=probs).item() 
+        
+        # Load images from `augmented_results`
+        anchor_img = Image.open(f'{self.dir}/Room{R}/Setting{S}/{agent}/episode_{ep:04}/augmented_results/aug{anchor_scene}_rgb_{step:05}.png')
+        pos_img = Image.open(f'{self.dir}/Room{R}/Setting{S}/{agent}/episode_{ep:04}/augmented_results/aug{pos_scene}_rgb_{step:05}.png')
+        
+        # Convert images to tensors
+        anchor = self.transforms(anchor_img)
+        pos_ex = self.transforms(pos_img)
+
+        # Retrieve additional information for the anchor
+        pos_sim_scores = np.ones(shape=(pos_ex.shape[0],))
+        lidar, gd, phi = self._info(record=record)
+
+        if self.mode == 'val':
+            scene1 = Image.open(f'{self.dir}/Room{R}/Setting{S}/{agent}/episode_{ep:04}/augmented_results/aug2_rgb_{step:05}.png')
+            scene1 = self.transforms(scene1)
+            scenes = torch.stack([scene1] + self._augs(record))
+
+            # In validation return all different scenes for visualziation
+            return anchor, scenes, pos_ex, pos_sim_scores, lidar, gd, phi
+
+        return anchor, pos_ex, pos_sim_scores, lidar, gd, phi
     
     def _scene_transfer_partition(self, idx: int):
         """
@@ -802,15 +849,14 @@ class RoomAllAgentsDataset(ContrastiveDataset):
         # pos_sim_scores = sim_scores[pos_df.index]
         # pos_df.reset_index(inplace=True, drop=True)
 
-        # Find enough negative examples to sample from 
-        # cur_thresh = self.pos_thresh
-        # pos_recs = temp_df[sim_scores >= cur_thresh]
-        # while pos_recs.shape[0] < self.n_pos*2:
-        #     cur_thresh -= 0.01
-        #     pos_recs = temp_df[sim_scores >= cur_thresh]
+        # Find enough positive examples to sample from 
+        cur_thresh = self.pos_thresh
+        pos_recs = temp_df[sim_scores >= cur_thresh]
+        while pos_recs.shape[0] == 0:
+            cur_thresh -= 0.05
+            pos_recs = temp_df[sim_scores >= cur_thresh]
 
         # Sample n_pos negative examples from all samples with score above the threshold
-        pos_recs = temp_df[sim_scores >= self.pos_thresh]
         pos_recs = pos_recs.sample(n=self.n_pos, random_state=self.seed, replace=True)
         pos_ex = self._load(pos_recs)
         pos_sim_scores = sim_scores[pos_recs.index]
@@ -826,14 +872,13 @@ class RoomAllAgentsDataset(ContrastiveDataset):
         # neg_sim_scores = sim_scores[neg_df.index]
 
         # Find enough negative examples to sample from 
-        # cur_thresh = self.neg_thresh
-        # neg_recs = temp_df[sim_scores <= cur_thresh]
-        # while neg_recs.shape[0] < self.n_neg*2:
-        #     cur_thresh += 0.01
-        #     neg_recs = temp_df[sim_scores <= cur_thresh]
+        cur_thresh = self.neg_thresh
+        neg_recs = temp_df[sim_scores <= cur_thresh]
+        while neg_recs.shape[0] == 0:
+            cur_thresh += 0.05
+            neg_recs = temp_df[sim_scores <= cur_thresh]
 
         # Sample n_neg negative examples from all samples with score below the threshold
-        neg_recs = temp_df[sim_scores <= self.neg_thresh]
         neg_recs = neg_recs.sample(n=self.n_neg, random_state=self.seed, replace=True)
         neg_ex = self._load(neg_recs)
         neg_sim_scores = sim_scores[neg_recs.index]

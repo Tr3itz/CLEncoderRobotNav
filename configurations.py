@@ -15,7 +15,7 @@ class Configurations:
         self.parser.add_argument('--datasets_path', type=str, required=True, help="Path to the datasets folder")
         self.parser.add_argument('--dataset', type=str, default='Room_all_agents', choices=['with-augmentations', 'Room_all_agents'], help="Dataset to use for training")
         self.parser.add_argument('--val_room', type=int, default=2, help="Validation room")
-        self.parser.add_argument('--algo', type=str, default='classic', choices=['classic', 'scene-transfer'], help='Contrastive Learning framework')
+        self.parser.add_argument('--algo', type=str, default='classic', choices=['classic', 'simclr', 'scene-transfer'], help='Contrastive Learning framework')
         self.parser.add_argument('--metric', type=str, default='lidar', choices=['lidar', 'goal', 'both'], help="Metric for denoting similarity")
         self.parser.add_argument('--mask', type=str, choices=['naive', 'binary', 'soft'], help='LiDAR readings mask')
         self.parser.add_argument('--shift', type=float, help="Shift of the sigmoid for soft LiDAR masking")
