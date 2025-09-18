@@ -183,8 +183,7 @@ class SNNSimCLR(SoftNearestNeighbor):
     def __call__(
             self,
             anc_batch: torch.Tensor, 
-            pos_batch: torch.Tensor,
-            pos_sim_scores: torch.Tensor, 
+            pos_batch: torch.Tensor, 
             lidars: torch.Tensor, 
             gds: torch.Tensor, 
             angles: torch.Tensor
