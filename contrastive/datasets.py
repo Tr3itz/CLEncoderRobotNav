@@ -21,11 +21,13 @@ from abc import ABC, abstractmethod
 class ContrastiveDataset(Dataset, ABC):
     def __init__(
             self, 
-            dir: str,
-            metric: str,
-            mask: str,
-            shift: float,  
+            dir: str,  
             transforms: v2,
+            algo: str,
+            n_pos: int,
+            pos_thresh: float,
+            n_neg: int,
+            neg_thresh: float,
             batch_size: int,
             micro_bsize: int,
             augmentations: list=None,
@@ -34,16 +36,19 @@ class ContrastiveDataset(Dataset, ABC):
             seed: int=42
         ):
         """
-        Torch implementation of Contrastive Dataset for Robotic Navigation.
+        Base dataset class.
         ----------
         Parameters:
         - dir: str            - directory of the dataset
-        - metric: str         - metric for computing similarity (lidar, goal, both)
-        - mask: str           - LiDAR readings mask type
         - transforms: v2      - image transformations to apply
+        - algo: str           - Contrastive Learning framework
+        - n_pos: int          - number of positive examples (scene-transfer framework)
+        - pos_thresh: float   - positive similarity threshold (scene-transfer framework)
+        - n_neg: int          - number of negative examples (scene-transfer framework)
+        - neg_thresh: float   - negative similarity threshold (scene-transfer framework)
         - batch_size: int     - size of the batch returned by the DataLoader
         - micro_bsize: int    - size of the micro-batch for gradient accumulation
-        - augmentations       - augmentations for positive examples
+        - augmentations       - augmentations for examples
         - mode: str           - dataset mode (train or val)
         - multi_gpu: bool     - whether the dataset is used for training a model on multiple GPUs
         - seed: int           - random seed for reproducibility        
@@ -59,6 +64,20 @@ class ContrastiveDataset(Dataset, ABC):
         # Image transformations and augmentations
         self.transforms = transforms
         self.augmentations = augmentations
+
+        # Contrastive Learning framework
+        assert algo in ['simclr', 'scene-transfer'], f'Unknown framework {algo}. Must be either `simclr` or `scene-transfer`!'
+        self.algo = algo
+        if self.algo == 'scene-transfer':
+            assert n_pos > 0 and n_neg > 0, 'Scene-transfer network with no examples.'
+           
+            # Positive examples
+            self.n_pos = n_pos
+            self.pos_thresh = pos_thresh
+            
+            # Negative examples
+            self.n_neg = n_neg
+            self.neg_thresh = neg_thresh
 
         # Dataset mode
         assert mode in ['train', 'val']
@@ -82,7 +101,155 @@ class ContrastiveDataset(Dataset, ABC):
             self.annot_df = self._annot()
 
         # Pandas methods will be used on this dataframe
-        assert isinstance(self.annot_df, pd.DataFrame)
+        assert isinstance(self.annot_df, pd.DataFrame), f'Annotations object is required to be a Pandas DataFrame. Found type {type(self.annot_df)}.'
+
+    def __del__(self):
+        if hasattr(self, '_shm'):
+            self._shm.close()
+
+    def __len__(self):
+        return self.annot_df.shape[0]   
+    
+    @abstractmethod
+    def __getitem__(self): pass
+    
+    @abstractmethod
+    def _annot(self):
+        """
+        Create a global annotations file of the dataset.
+        """
+        pass
+
+    @abstractmethod
+    def _init_sim_matrix(self):
+        """
+        Initialize similarity matrix (n_samples, n_samples), given additional information in self.annot_df. 
+        """
+        pass
+
+    def _free_shm(self, rank):
+        if hasattr(self, '_shm'):
+            self._shm.close()
+            if rank == 0:
+                self._shm.unlink()
+    
+    def _shared_sim_mat(self):
+        print([print(f"[GPU:{distr.get_rank()}] COMPUTING {'TRAINING' if self.mode == 'train' else 'VALIDATION'} SIMILARITY SCORES MATRIX...")])
+        sim_scores_mat = self._init_sim_matrix()
+
+        # Matrix info 
+        shape = sim_scores_mat.shape
+        dtype = sim_scores_mat.dtype
+        size = sim_scores_mat.nbytes
+
+        print([print(f"[GPU:{distr.get_rank()}] Copying similarity scores matrix on shared memory...")])
+        # Shared memory block creation
+        try:
+            shm = shared_memory.SharedMemory(name=f'{self.mode}_sim_scores_mat', create=True, size=size)
+            shared_mat = np.ndarray(shape=shape, dtype=dtype, buffer=shm.buf)
+            shared_mat[:] = sim_scores_mat[:] # Copy on shared memory
+        except FileExistsError:
+            shm = shared_memory.SharedMemory(name=f'{self.mode}_sim_scores_mat', create=False)
+            shared_mat = np.ndarray(shape=shape, dtype=dtype, buffer=shm.buf)
+
+        return shm, shared_mat
+    
+    def set_shared_sim_mat(self):
+        if not hasattr(self, 'sim_scores_mat'):
+            try:
+                shm = shared_memory.SharedMemory(name=f'{self.mode}_sim_scores_mat', create=False)
+                self.sim_scores_mat = np.ndarray(shape=(self.annot_df.shape[0], self.annot_df.shape[0]), dtype=np.float32, buffer=shm.buf)
+                self._shm = shm
+            except FileNotFoundError:
+                print(f'Could not find shared memory block named `{self.mode}_sim_scores_mat`.')
+
+    def get_DataLoader(self, num_workers: int=None) -> DataLoader:
+        """ 
+        Return the torch DataLoader of the dataset.
+        """
+        if self.multi_gpu:
+            return DataLoader(
+                dataset=self,
+                batch_size=self.batch_size,
+                num_workers=num_workers,
+                pin_memory=True,
+                drop_last=(self.mode == 'train'),
+                sampler=DistributedSampler(self)
+            )
+        else:
+            return DataLoader(
+                dataset=self,
+                batch_size=self.batch_size,
+                shuffle=(self.mode == 'train'),
+                num_workers=num_workers,
+                pin_memory=True,
+                drop_last=(self.mode == 'train'),
+            )
+
+
+class RoomAllAgentsDataset(ContrastiveDataset):
+    def __init__(
+            self,
+            dir: str,
+            algo: str,
+            metric: str,
+            mask: str,
+            shift: float,
+            n_pos: int,
+            pos_thresh: float,
+            n_neg: int,
+            neg_thresh: float,
+            batch_size: int,
+            micro_bsize: int,
+            val_room: int,
+            transforms: v2,
+            augmentations: list=None,
+            mode: str='train',
+            multi_gpu: bool=False,
+            seed: int=42
+        ):
+        """
+        Torch implementation of Contrastive Dataset for Obstacle Avoidance in Robotic Navigation.
+        ----------
+        Parameters:
+        - dir: str            - directory of the dataset
+        - metric: str         - metric for computing sample similarity (lidar, goal, both)
+        - mask: str           - LiDAR readings mask type
+        - algo: str           - Contrastive Learning framework
+        - n_pos: int          - number of positive examples (scene-transfer framework)
+        - pos_thresh: float   - positive similarity threshold (scene-transfer framework)
+        - n_neg: int          - number of negative examples (scene-transfer framework)
+        - neg_thresh: float   - negative similarity threshold (scene-transfer framework)
+        - batch_size: int     - size of the batch returned by the DataLoader
+        - micro_bsize: int    - size of the micro-batch for gradient accumulation
+        - val_room: int       - validation room
+        - transforms: v2      - image transformations to apply
+        - augmentations       - additional augmentations for positive examples
+        - mode: str           - dataset mode (train or val)
+        - multi_gpu: bool     - whether the dataset is used for training a model on multiple GPUs
+        - seed: int           - random seed for reproducibility
+        """
+        super().__init__(
+            dir=dir,
+            transforms=transforms,
+            algo=algo,
+            n_pos=n_pos,
+            pos_thresh=pos_thresh,
+            n_neg=n_neg,
+            neg_thresh=neg_thresh,
+            batch_size=batch_size,
+            micro_bsize=micro_bsize,
+            augmentations=augmentations,
+            mode=mode,
+            multi_gpu=multi_gpu,
+            seed=seed
+        )
+            
+        # Scenes partitions
+        self.SCENES = {
+            'train': [3, 4, 5, 6],
+            'val': [1, 2, 7]
+        }
 
         # Similarity metric
         assert metric in ['lidar', 'goal', 'both']
@@ -113,309 +280,6 @@ class ContrastiveDataset(Dataset, ABC):
             self.mask = w.astype(np.float32)
             self.norm = np.sqrt(w.sum()).astype(np.float32)
 
-    def __del__(self):
-        if hasattr(self, '_shm'):
-            self._shm.close()
-
-    def __len__(self):
-        return self.annot_df.shape[0]
-    
-    @abstractmethod
-    def __getitem__(self): pass
-    
-    @abstractmethod
-    def _annot(self):
-        """
-        Create a global annotations file of the dataset.
-        """
-        pass
-
-    def _free_shm(self, rank):
-        if hasattr(self, '_shm'):
-            self._shm.close()
-            if rank == 0:
-                self._shm.unlink()
-    
-    def _opposite_corner(self, x: int | float, y: int | float) -> tuple[int]:
-        """
-        Return the corner on the opposite quadrant w.r.t (x, y).
-        ----------
-        ASSUMPTION: 10mx10m room with reference point at the center.
-        """
-
-        corner_x = -5 if x >= 0 else 5
-        corner_y = -5 if y >= 0 else 5
-        return corner_x, corner_y 
-    
-    def _goal_distance(self, record: pd.Series):
-        """
-        Compute distance w.r.t. the goal position
-        """
-        # Info
-        goal_x, goal_y = record['target_point_x'], record['target_point_y']
-        corner_x, corner_y = self._opposite_corner(goal_x, goal_y)
-
-        # Normalized goal distance
-        max_gd = np.sqrt((goal_x - corner_x)**2 + (goal_y - corner_y)**2)
-        goal_dist = np.sqrt((record['robot_pos_x']  - goal_x)**2 + (record['robot_pos_y']  - goal_y)**2)
-        return goal_dist / max_gd
-    
-    def _normalize_angle(self, angle: float | np.ndarray):
-        """
-        Normalize angle in [-pi, pi]
-        """
-        return (angle + np.pi) % (2 * np.pi) - np.pi
-    
-    def _relative_angle(self, record: pd.Series):
-        """
-        Compute orientation w.r.t. the goal position
-        """
-        # Info
-        robot_x, robot_y = record['robot_pos_x'], record['robot_pos_y']
-        goal_x, goal_y = record['target_point_x'], record['target_point_y']
-        theta_r = record['robot_yaw'] 
-
-        # Relative angle
-        dx = goal_x - robot_x
-        dy = goal_y - robot_y
-        theta_g = np.arctan2(dy, dx)
-        return self._normalize_angle(theta_g - theta_r)
-    
-    def _init_sim_matrix(self):
-        """
-        Initialize similarity matrix of samples in the dataset,
-        given additional information in self.annot_df. 
-        """
-
-        df = self.annot_df.copy()
-        shape = df.shape[0]
-
-        lid_dist_mat = np.ones(shape=(shape, shape), dtype=np.float32)
-        gd_mat = np.ones(shape=(shape, shape), dtype=np.float32)
-        ori_diff_mat = np.ones(shape=(shape, shape), dtype=np.float32)
-
-        # Compute distance matrices
-        if not self.multi_gpu: print(f"\nCOMPUTING {'TRAINING' if self.mode == 'train' else 'VALIDATION'} SIMILARITY SCORES MATRIX...")
-        for idx, obs in tqdm(df.iterrows(), unit='obs', disable=self.multi_gpu, total=shape):
-            # Observations info
-            lidar = obs['laser_readings']['scan'].squeeze()
-            gd = self._goal_distance(obs)
-            phi = self._relative_angle(obs)            
-            
-            if self.metric in ['lidar', 'both']:
-                # Weighted LiDAR eucledian distance
-                eucledian_dists = df['laser_readings'].map(lambda x: np.sqrt(np.sum(self.mask*(lidar - x['scan'].squeeze())**2)) / self.norm).to_numpy()
-                lid_dist_mat[idx] *= eucledian_dists
-            
-            if self.metric in ['goal', 'both']:
-                # Goal distance differences
-                gd_diffs = df.apply(lambda x: abs(gd - self._goal_distance(x)), axis=1).to_numpy()
-                gd_mat[idx] *= gd_diffs
-                # Differences in the orientation w.r.t. the goal
-                ori_diffs = df.apply(lambda x: np.abs(self._normalize_angle(phi - self._relative_angle(x))) / np.pi, axis=1)
-                ori_diff_mat[idx] *= ori_diffs
-
-        # Compute similarities
-        if self.metric == 'lidar':
-            sim_scores_mat = (1 - lid_dist_mat)
-        elif self.metric == 'goal':
-            sim_scores_mat = (1 - gd_mat)*(1 - ori_diff_mat)
-        else:
-            sim_scores_mat = (1 - lid_dist_mat)*(1 - gd_mat)*(1 - ori_diff_mat)
-        
-        return sim_scores_mat
-    
-    def _init_sim_matrix_vect(self, batch_size: int=1000):
-        if not self.multi_gpu: print(f"\nCOMPUTING {'TRAINING' if self.mode == 'train' else 'VALIDATION'} SIMILARITY SCORES MATRIX...")
-
-        print('Extracting LiDARs...')
-        # Extract all LiDAR scans
-        if self.metric in ['lidar', 'both']:
-            all_lidar_scans = np.vstack(
-                self.annot_df['laser_readings'].map(lambda x: x['scan'].squeeze()).to_numpy()
-            ).astype(np.float32)
-
-        print('Extracting goal info...')
-        # Extract all goal information 
-        if self.metric in ['goal', 'both']:
-            all_goal_distances = self.annot_df.apply(lambda x: self._goal_distance(x), axis=1).to_numpy().astype(np.float32)
-            all_relative_angles = self.annot_df.apply(lambda x: self._relative_angle(x), axis=1).to_numpy().astype(np.float32)
-
-        n_samples = self.annot_df.shape[0]
-        sim_scores_mat = np.ones((n_samples, n_samples), dtype=np.float32)
-
-        for i in tqdm(range(0, n_samples, batch_size), disable=self.multi_gpu, unit='rec'):
-            start, end = i, min(i + batch_size, n_samples)
-
-            # Default similarity values
-            lid_sim = 1.0
-            gd_sim = 1.0
-            ori_sim = 1.0
-
-            if self.metric in ['lidar', 'both']:
-                # Load batch
-                batch_scans = all_lidar_scans[start:end, :]
-
-                # Pair-wise weighted LiDAR distances
-                weighted_scans = all_lidar_scans * np.sqrt(self.mask)
-                weighted_batch = batch_scans * np.sqrt(self.mask)
-                lid_dist = cdist(weighted_batch, weighted_scans, metric='euclidean') / self.norm
-                
-                # Square matrix recontruction
-                # lid_dist_mat = squareform(condensed_dists) / self.norm
-                lid_sim = (1 - lid_dist)
-
-            if self.metric in ['goal', 'both']:
-                # Load batches
-                batch_gd = all_goal_distances[start:end]
-                batch_ori = all_relative_angles[start:end]
-
-                # Goal distance difference matrix
-                gd_mat = np.abs(batch_gd[:, np.newaxis] - all_goal_distances)
-                gd_sim = (1 - gd_mat)
-
-                # Goal orientation difference matrix
-                ori_diffs = batch_ori[:, np.newaxis] - all_relative_angles
-                ori_diff_mat = np.abs(self._normalize_angle(ori_diffs)) / np.pi
-                ori_sim = (1 - ori_diff_mat)
-
-            # Similarity scores matrix
-            batch_sim_scores = lid_sim * gd_sim * ori_sim
-            sim_scores_mat[start:end, :] = batch_sim_scores
-        
-        # Ensure the diagonal is 1 (similarity of an element with itself)
-        np.fill_diagonal(sim_scores_mat, 1.0)
-        return sim_scores_mat
-    
-    def _shared_sim_mat(self):
-        print([print(f"[GPU:{distr.get_rank()}] COMPUTING {'TRAINING' if self.mode == 'train' else 'VALIDATION'} SIMILARITY SCORES MATRIX...")])
-        sim_scores_mat = self._init_sim_matrix_vect()
-
-        # Matrix info 
-        shape = sim_scores_mat.shape
-        dtype = sim_scores_mat.dtype
-        size = sim_scores_mat.nbytes
-
-        print([print(f"[GPU:{distr.get_rank()}] Copying similarity scores matrix on shared memory...")])
-        # Shared memory block creation
-        try:
-            shm = shared_memory.SharedMemory(name=f'{self.mode}_sim_scores_mat', create=True, size=size)
-            shared_mat = np.ndarray(shape=shape, dtype=dtype, buffer=shm.buf)
-            shared_mat[:] = sim_scores_mat[:] # Copy on shared memory
-        except FileExistsError:
-            shm = shared_memory.SharedMemory(name=f'{self.mode}_sim_scores_mat', create=False)
-            shared_mat = np.ndarray(shape=shape, dtype=dtype, buffer=shm.buf)
-
-        return shm, shared_mat
-
-    def get_DataLoader(self, num_workers: int=None) -> DataLoader:
-        """ 
-        Return the torch DataLoader of the dataset.
-        """
-        if self.multi_gpu:
-            return DataLoader(
-                dataset=self,
-                batch_size=self.batch_size,
-                num_workers=num_workers,
-                pin_memory=True,
-                drop_last=(self.mode == 'train'),
-                sampler=DistributedSampler(self)
-            )
-        else:
-            return DataLoader(
-                dataset=self,
-                batch_size=self.batch_size,
-                shuffle=(self.mode == 'train'),
-                num_workers=num_workers,
-                pin_memory=True,
-                drop_last=(self.mode == 'train'),
-            )
-
-    def set_shared_sim_mat(self):
-        if not hasattr(self, 'sim_scores_mat'):
-            try:
-                shm = shared_memory.SharedMemory(name=f'{self.mode}_sim_scores_mat', create=False)
-                self.sim_scores_mat = np.ndarray(shape=(self.annot_df.shape[0], self.annot_df.shape[0]), dtype=np.float32, buffer=shm.buf)
-                self._shm = shm
-            except FileNotFoundError:
-                print(f'Could not find shared memory block named `sim_scores_mat`.')
-
-
-class RoomAllAgentsDataset(ContrastiveDataset):
-    def __init__(
-            self,
-            dir: str,
-            algo: str,
-            metric: str,
-            mask: str,
-            shift: float,
-            n_pos: int,
-            pos_thresh: float,
-            n_neg: int,
-            neg_thresh: float,
-            batch_size: int,
-            micro_bsize: int,
-            val_room: int,
-            transforms: v2,
-            augmentations: list=None,
-            mode: str='train',
-            multi_gpu: bool=False,
-            seed: int=42
-        ):
-        """
-        Torch implementation of with-augmentations dataset.
-        ----------
-        Parameters:
-        - dir: str            - directory of the dataset
-        - metric: str         - metric for computing sample similarity (lidar, goal, both)
-        - mask: str           - LiDAR readings mask type
-        - n_pos: int          - number of positive examples
-        - pos_thresh: float   - positive similarity threshold
-        - n_neg: int          - number of negative examples
-        - neg_thresh: float   - negative similarity threshold
-        - batch_size: int     - size of the batch returned by the DataLoader
-        - micro_bsize: int    - size of the micro-batch for gradient accumulation
-        - val_room: int       - validation room
-        - transforms: v2      - image transformations to apply
-        - augmentations       - additional augmentations for positive examples
-        - mode: str           - dataset mode (train or val)
-        - multi_gpu: bool     - whether the dataset is used for training a model on multiple GPUs
-        - seed: int           - random seed for reproducibility
-        """
-        super().__init__(
-            dir=dir,
-            metric=metric,
-            mask=mask,
-            shift=shift,
-            transforms=transforms,
-            batch_size=batch_size,
-            micro_bsize=micro_bsize,
-            augmentations=augmentations,
-            mode=mode,
-            multi_gpu=multi_gpu,
-            seed=seed
-        )
-        # Algorithm
-        assert algo in ['simclr', 'scene-transfer'], f'Unknown framework {algo}. Must be either `simclr` or `scene-transfer`!'
-        self.algo = algo
-
-        if self.algo != 'classic':
-            # assert n_pos > 0 and n_neg > 0, 'Scene transfer network with no examples.'
-            
-            # Scenes partitions
-            self.SCENES = {
-                'train': [3, 4, 5, 6],
-                'val': [1, 2, 7]
-            }
-
-            # Positive examples
-            self.n_pos = n_pos
-            self.pos_thresh = pos_thresh
-            
-            # Negative examples
-            self.n_neg = n_neg
-            self.neg_thresh = neg_thresh
-
         # Annotations
         assert val_room in self.annot_df['room'].unique()
         if self.mode == 'train':
@@ -431,7 +295,7 @@ class RoomAllAgentsDataset(ContrastiveDataset):
                     self._shm, self.sim_scores_mat = self._shared_sim_mat()
                     self.sim_scores_range = self.sim_scores_mat.max() - self.sim_scores_mat.min()
             else:   
-                self.sim_scores_mat = self._init_sim_matrix_vect()
+                self.sim_scores_mat = self._init_sim_matrix()
                 self.sim_scores_range = self.sim_scores_mat.max() - self.sim_scores_mat.min()
 
     def __getitem__(self, idx: int):
@@ -439,35 +303,6 @@ class RoomAllAgentsDataset(ContrastiveDataset):
             return self._simclr_partition(idx)
         else:
             return self._scene_transfer_partition(idx)
-    
-    def _classic_partition(self, idx: int):
-        """
-        Partition the dataset in anchors and positive examples
-        following the classic Contrastive Learning approach. 
-        """
-
-        # Retrieve image location from the annotations dataframe 
-        record = self.annot_df.iloc[idx]
-        R = record['room']
-        S = record['setting']
-        agent = record['agent']
-        ep = record['episode']
-        step = record['step']
-        
-        # Load anchor image from `augmented_results`
-        img = Image.open(f'{self.dir}/Room{R}/Setting{S}/{agent}/episode_{ep:04}/augmented_results/aug2_rgb_{step:05}.png')
-        anchor = self.transforms(img)
-
-        # Augmentations of the anchor image
-        augs = [augm(img) for augm in self.augmentations] + self._augs(record)
-        pos_ex = torch.stack(augs)
-        pos_sim_scores = np.ones(shape=(pos_ex.shape[0],))
-        
-        # Retrieve additional information for the anchor
-        anc_lidar, anc_gd, anc_phi = self._info(record=record)
-
-        # Return additional information to the anchor for in-batch similarities
-        return anchor, pos_ex, pos_sim_scores, anc_lidar, anc_gd, anc_phi
     
     def _simclr_partition(self, idx: int, penalty: float=0.3):
         """
@@ -639,6 +474,157 @@ class RoomAllAgentsDataset(ContrastiveDataset):
             annot_df.to_pickle(f'{self.dir}/annotations.pkl')
 
         return annot_df
+    
+    def _init_sim_matrix(self, batch_size: int=1000):
+        if not self.multi_gpu: print(f"\nCOMPUTING {'TRAINING' if self.mode == 'train' else 'VALIDATION'} SIMILARITY SCORES MATRIX...")
+
+        print('Extracting LiDARs...')
+        # Extract all LiDAR scans
+        if self.metric in ['lidar', 'both']:
+            all_lidar_scans = np.vstack(
+                self.annot_df['laser_readings'].map(lambda x: x['scan'].squeeze()).to_numpy()
+            ).astype(np.float32)
+
+        print('Extracting goal info...')
+        # Extract all goal information 
+        if self.metric in ['goal', 'both']:
+            all_goal_distances = self.annot_df.apply(lambda x: self._goal_distance(x), axis=1).to_numpy().astype(np.float32)
+            all_relative_angles = self.annot_df.apply(lambda x: self._relative_angle(x), axis=1).to_numpy().astype(np.float32)
+
+        n_samples = self.annot_df.shape[0]
+        sim_scores_mat = np.ones((n_samples, n_samples), dtype=np.float32)
+
+        for i in tqdm(range(0, n_samples, batch_size), disable=self.multi_gpu, unit='rec'):
+            start, end = i, min(i + batch_size, n_samples)
+
+            # Default similarity values
+            lid_sim = 1.0
+            gd_sim = 1.0
+            ori_sim = 1.0
+
+            if self.metric in ['lidar', 'both']:
+                # Load batch
+                batch_scans = all_lidar_scans[start:end, :]
+
+                # Pair-wise weighted LiDAR distances
+                weighted_scans = all_lidar_scans * np.sqrt(self.mask)
+                weighted_batch = batch_scans * np.sqrt(self.mask)
+                lid_dist = cdist(weighted_batch, weighted_scans, metric='euclidean') / self.norm
+                
+                # Square matrix recontruction
+                # lid_dist_mat = squareform(condensed_dists) / self.norm
+                lid_sim = (1 - lid_dist)
+
+            if self.metric in ['goal', 'both']:
+                # Load batches
+                batch_gd = all_goal_distances[start:end]
+                batch_ori = all_relative_angles[start:end]
+
+                # Goal distance difference matrix
+                gd_mat = np.abs(batch_gd[:, np.newaxis] - all_goal_distances)
+                gd_sim = (1 - gd_mat)
+
+                # Goal orientation difference matrix
+                ori_diffs = batch_ori[:, np.newaxis] - all_relative_angles
+                ori_diff_mat = np.abs(self._normalize_angle(ori_diffs)) / np.pi
+                ori_sim = (1 - ori_diff_mat)
+
+            # Similarity scores matrix
+            batch_sim_scores = lid_sim * gd_sim * ori_sim
+            sim_scores_mat[start:end, :] = batch_sim_scores
+        
+        # Ensure the diagonal is 1 (similarity of an element with itself)
+        np.fill_diagonal(sim_scores_mat, 1.0)
+        return sim_scores_mat
+    
+    def _init_sim_matrix_depr(self):
+        """
+        Initialize similarity matrix of samples in the dataset,
+        given additional information in self.annot_df. 
+        """
+
+        df = self.annot_df.copy()
+        shape = df.shape[0]
+
+        lid_dist_mat = np.ones(shape=(shape, shape), dtype=np.float32)
+        gd_mat = np.ones(shape=(shape, shape), dtype=np.float32)
+        ori_diff_mat = np.ones(shape=(shape, shape), dtype=np.float32)
+
+        # Compute distance matrices
+        if not self.multi_gpu: print(f"\nCOMPUTING {'TRAINING' if self.mode == 'train' else 'VALIDATION'} SIMILARITY SCORES MATRIX...")
+        for idx, obs in tqdm(df.iterrows(), unit='obs', disable=self.multi_gpu, total=shape):
+            # Observations info
+            lidar = obs['laser_readings']['scan'].squeeze()
+            gd = self._goal_distance(obs)
+            phi = self._relative_angle(obs)            
+            
+            if self.metric in ['lidar', 'both']:
+                # Weighted LiDAR eucledian distance
+                eucledian_dists = df['laser_readings'].map(lambda x: np.sqrt(np.sum(self.mask*(lidar - x['scan'].squeeze())**2)) / self.norm).to_numpy()
+                lid_dist_mat[idx] *= eucledian_dists
+            
+            if self.metric in ['goal', 'both']:
+                # Goal distance differences
+                gd_diffs = df.apply(lambda x: abs(gd - self._goal_distance(x)), axis=1).to_numpy()
+                gd_mat[idx] *= gd_diffs
+                # Differences in the orientation w.r.t. the goal
+                ori_diffs = df.apply(lambda x: np.abs(self._normalize_angle(phi - self._relative_angle(x))) / np.pi, axis=1)
+                ori_diff_mat[idx] *= ori_diffs
+
+        # Compute similarities
+        if self.metric == 'lidar':
+            sim_scores_mat = (1 - lid_dist_mat)
+        elif self.metric == 'goal':
+            sim_scores_mat = (1 - gd_mat)*(1 - ori_diff_mat)
+        else:
+            sim_scores_mat = (1 - lid_dist_mat)*(1 - gd_mat)*(1 - ori_diff_mat)
+        
+        return sim_scores_mat
+    
+    def _opposite_corner(self, x: int | float, y: int | float) -> tuple[int]:
+        """
+        Return the corner on the opposite quadrant w.r.t (x, y).
+        ----------
+        ASSUMPTION: 10mx10m room with reference point at the center.
+        """
+
+        corner_x = -5 if x >= 0 else 5
+        corner_y = -5 if y >= 0 else 5
+        return corner_x, corner_y 
+    
+    def _goal_distance(self, record: pd.Series):
+        """
+        Compute distance w.r.t. the goal position
+        """
+        # Info
+        goal_x, goal_y = record['target_point_x'], record['target_point_y']
+        corner_x, corner_y = self._opposite_corner(goal_x, goal_y)
+
+        # Normalized goal distance
+        max_gd = np.sqrt((goal_x - corner_x)**2 + (goal_y - corner_y)**2)
+        goal_dist = np.sqrt((record['robot_pos_x']  - goal_x)**2 + (record['robot_pos_y']  - goal_y)**2)
+        return goal_dist / max_gd
+    
+    def _normalize_angle(self, angle: float | np.ndarray):
+        """
+        Normalize angle in [-pi, pi]
+        """
+        return (angle + np.pi) % (2 * np.pi) - np.pi
+    
+    def _relative_angle(self, record: pd.Series):
+        """
+        Compute orientation w.r.t. the goal position
+        """
+        # Info
+        robot_x, robot_y = record['robot_pos_x'], record['robot_pos_y']
+        goal_x, goal_y = record['target_point_x'], record['target_point_y']
+        theta_r = record['robot_yaw'] 
+
+        # Relative angle
+        dx = goal_x - robot_x
+        dy = goal_y - robot_y
+        theta_g = np.arctan2(dy, dx)
+        return self._normalize_angle(theta_g - theta_r)
     
     def _augs(self, record: pd.Series) -> list[torch.Tensor]:
         """

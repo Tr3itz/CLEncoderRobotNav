@@ -11,14 +11,10 @@ class Configurations:
         # General settings
         self.parser.add_argument('--seed', type=int, default=42, help="Random seed for reproducibility")
 
-        # Dataset settings
+        # General datasets settings
         self.parser.add_argument('--datasets_path', type=str, required=True, help="Path to the datasets folder")
-        self.parser.add_argument('--dataset', type=str, default='Room_all_agents', choices=['with-augmentations', 'Room_all_agents'], help="Dataset to use for training")
-        self.parser.add_argument('--val_room', type=int, default=2, help="Validation room")
+        self.parser.add_argument('--dataset', type=str, default='Room_all_agents', choices=['Room_all_agents'], help="Dataset to use for training")
         self.parser.add_argument('--algo', type=str, default='simclr', choices=['simclr', 'scene-transfer'], help='Contrastive Learning framework')
-        self.parser.add_argument('--metric', type=str, default='lidar', choices=['lidar', 'goal', 'both'], help="Metric for denoting similarity")
-        self.parser.add_argument('--mask', type=str, choices=['naive', 'binary', 'soft'], help='LiDAR readings mask')
-        self.parser.add_argument('--shift', type=float, help="Shift of the sigmoid for soft LiDAR masking")
         self.parser.add_argument('--n_pos', type=int, default=0, help="Number of positive examples to sample per anchor during training")
         self.parser.add_argument('--pos_thresh', type=float, default=0.8, help="Positive similarity threshold")
         self.parser.add_argument('--n_neg', type=int, default=0, help="Number of negative examples to sample per anchor during training")
@@ -26,6 +22,12 @@ class Configurations:
         self.parser.add_argument('--batch_size', type=int, default=8, help="Batch size for training and evaluation")
         self.parser.add_argument('--micro_bsize', type=int, default=0, help="Micro-batch size for gradient accumulation")
         self.parser.add_argument('--num_workers', type=int, default=20, help="Number of workers for data loading")
+
+        # Robotic Navigation datasets settings
+        self.parser.add_argument('--val_room', type=int, default=2, help="Validation room")
+        self.parser.add_argument('--metric', type=str, default='lidar', choices=['lidar', 'goal', 'both'], help="Metric for denoting similarity")
+        self.parser.add_argument('--mask', type=str, choices=['naive', 'binary', 'soft'], help="LiDAR readings mask")
+        self.parser.add_argument('--shift', type=float, help="Shift of the sigmoid for soft LiDAR masking")
 
         # Model, Loss, Optimizer and Scheduler settings
         self.parser.add_argument('--model', type=str, default='resnet50', choices=['resnet50', 'mbnv3'], help="Backbone encoder to use")
