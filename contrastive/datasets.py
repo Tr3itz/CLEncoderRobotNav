@@ -320,8 +320,6 @@ class ContrastiveDataset(Dataset, ABC):
         Return the torch DataLoader of the dataset.
         """
         if self.multi_gpu:
-            self.batch_size = self.batch_size if self.mode == 'train' else self.batch_size // 2
-            self.micro_bsize = self.micro_bsize if self.mode == 'train' else self.micro_bsize // 2
             return DataLoader(
                 dataset=self,
                 batch_size=self.batch_size,
