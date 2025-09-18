@@ -85,7 +85,7 @@ class ContrastiveTrainer(ABC):
         fig.savefig(f'{self.figs_dir}/epoch_{epoch + 1}.png', format='png')
         plt.close(fig)
 
-    def _intra_consistency(self, embeddings: torch.Tensor, fig: Figure, n_bins: int=20):
+    def _intra_consistency(self, embeddings: torch.Tensor, fig: Figure, n_bins: int=20): # TODO: change to 10 bins
         print('Intra-scene consistency visualization...')
 
         # Inter-scene consistency
@@ -103,7 +103,7 @@ class ContrastiveTrainer(ABC):
             # Measure the embedding similarity between the anchor and the sorted embeddings 
             embedding_sims = F.cosine_similarity(anc_embedding, sorted_embeddings)
             for j, sim in enumerate(embedding_sims):
-                bin = int((1.0-score[j].item()) / bin_tol)
+                bin = int((1.0-sorted_scores[j].item()) / bin_tol)
                 if bin == len(bins): 
                     bins[-1].append(sim.item())
                 else:
@@ -332,7 +332,7 @@ class SingleGPUTrainer(ContrastiveTrainer):
                     b_neg_sim_scores = neg_sim_scores[start:end, ...].to(self.device)
 
                     # Adaptive Contrastive Loss
-                    loss = self.loss_fn(anc_embeddings, pos_embeddings, b_pos_sim_scores, neg_batch=neg_embeddings, b_neg_sim_scores=neg_sim_scores)
+                    loss = self.loss_fn(anc_embeddings, pos_embeddings, b_pos_sim_scores, neg_batch=neg_embeddings, neg_sim_scores=b_neg_sim_scores)
 
                     # Move back on the CPU and free space
                     del anc_embeddings, pos_embeddings, b_pos_sim_scores, \
@@ -628,7 +628,7 @@ class MultiGPUTrainer(ContrastiveTrainer):
                     b_neg_sim_scores = neg_sim_scores[start:end, ...].to(self.device)
 
                     # Adaptive Contrastive Loss
-                    loss = self.loss_fn(anc_embeddings, pos_embeddings, b_pos_sim_scores, neg_batch=neg_embeddings, b_neg_sim_scores=neg_sim_scores)
+                    loss = self.loss_fn(anc_embeddings, pos_embeddings, b_pos_sim_scores, neg_batch=neg_embeddings, neg_sim_scores=b_neg_sim_scores)
 
                     # Move back on the CPU and free space
                     del anc_embeddings, pos_embeddings, b_pos_sim_scores, \
