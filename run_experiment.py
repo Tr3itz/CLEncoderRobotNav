@@ -10,7 +10,7 @@ from torch.distributed import init_process_group, destroy_process_group
 
 # Contrastive imports
 from trainer import SingleGPUTrainer, MultiGPUTrainer
-from contrastive.datasets import RoomAllAgentsDataset
+from contrastive.datasets import ContrastiveDataset, RoomAllAgentsDataset, AirSimDataset
 from contrastive.encoder import ResNetEncoder, MobileNetV3Encoder
 MODEL = {
     'resnet50': ResNetEncoder,
@@ -49,7 +49,7 @@ def ddp_setup(rank: int, world_size: int):
     print(f'[GPU:{rank}] DDP successfully set up!')
 
 
-def get_dataset(args) -> tuple[RoomAllAgentsDataset]:
+def get_dataset(args) -> tuple[ContrastiveDataset]:
     transforms = v2.Compose([
         v2.ToImage(),
         v2.ToDtype(torch.uint8, scale=True),
@@ -58,60 +58,65 @@ def get_dataset(args) -> tuple[RoomAllAgentsDataset]:
         v2.ToDtype(torch.float32, scale=True),
         v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
-
-    # Augmentations for positive examples
-    augmentations = [
-        # Brighter 
-        v2.Compose([
-            v2.ToImage(),
-            v2.ToDtype(torch.uint8, scale=True),
-            v2.Resize([232,232]),
-            v2.CenterCrop([224,224]),
-            v2.ColorJitter(brightness=(1.5,2.0)),
-            v2.ToDtype(torch.float32, scale=True),
-            v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ]),  
-    ]
     
-    # Training dataset
-    train_dataset = RoomAllAgentsDataset(
-        dir=f'{args.datasets_path}/{args.dataset}',
-        algo=args.algo,
-        val_room=args.val_room,
-        metric=args.metric,
-        mask=args.mask,
-        shift = args.shift,
-        n_pos=args.n_pos,
-        pos_thresh=args.pos_thresh,
-        n_neg=args.n_neg,
-        neg_thresh=args.neg_thresh,
-        batch_size=args.batch_size,
-        micro_bsize=args.micro_bsize,
-        transforms=transforms,
-        augmentations=augmentations,
-        mode='train',
-        multi_gpu=args.multi_gpu
-    )
+    if args.dataset == 'Room_all_agents':
+        # Training dataset
+        train_dataset = RoomAllAgentsDataset(
+            dir=f'{args.datasets_path}/{args.dataset}',
+            algo=args.algo,
+            val_room=args.val_room,
+            metric=args.metric,
+            mask=args.mask,
+            shift = args.shift,
+            n_pos=args.n_pos,
+            pos_thresh=args.pos_thresh,
+            n_neg=args.n_neg,
+            neg_thresh=args.neg_thresh,
+            batch_size=args.batch_size,
+            micro_bsize=args.micro_bsize,
+            transforms=transforms,
+            mode='train',
+            multi_gpu=args.multi_gpu
+        )
 
-    # Validation dataset
-    val_dataset = RoomAllAgentsDataset(
-        dir=f'{args.datasets_path}/{args.dataset}',
-        algo=args.algo,
-        val_room=args.val_room,
-        metric=args.metric,
-        mask=args.mask,
-        shift = args.shift,
-        n_pos=args.n_pos,
-        pos_thresh=args.pos_thresh,
-        n_neg=args.n_neg,
-        neg_thresh=args.neg_thresh,
-        batch_size=args.batch_size,
-        micro_bsize=args.micro_bsize,
-        transforms=transforms,
-        augmentations=augmentations,
-        mode='val',
-        multi_gpu=args.multi_gpu
-    )
+        # Validation dataset
+        val_dataset = RoomAllAgentsDataset(
+            dir=f'{args.datasets_path}/{args.dataset}',
+            algo=args.algo,
+            val_room=args.val_room,
+            metric=args.metric,
+            mask=args.mask,
+            shift = args.shift,
+            n_pos=args.n_pos,
+            pos_thresh=args.pos_thresh,
+            n_neg=args.n_neg,
+            neg_thresh=args.neg_thresh,
+            batch_size=args.batch_size,
+            micro_bsize=args.micro_bsize,
+            transforms=transforms,
+            mode='val',
+            multi_gpu=args.multi_gpu
+        )
+    else:
+        # Training dataset
+        train_dataset = AirSimDataset(
+            dir=f'{args.datasets_path}/{args.dataset}',
+            batch_size=args.batch_size,
+            micro_bsize=args.micro_bsize,
+            transforms=transforms,
+            mode='train',
+            multi_gpu=args.multi_gpu
+        )
+
+        # Validation dataset
+        val_dataset = AirSimDataset(
+            dir=f'{args.datasets_path}/{args.dataset}',
+            batch_size=args.batch_size,
+            micro_bsize=args.micro_bsize,
+            transforms=transforms,
+            mode='val',
+            multi_gpu=args.multi_gpu
+        )
 
     return train_dataset, val_dataset
 

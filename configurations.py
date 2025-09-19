@@ -13,7 +13,7 @@ class Configurations:
 
         # General datasets settings
         self.parser.add_argument('--datasets_path', type=str, required=True, help="Path to the datasets folder")
-        self.parser.add_argument('--dataset', type=str, default='Room_all_agents', choices=['Room_all_agents'], help="Dataset to use for training")
+        self.parser.add_argument('--dataset', type=str, default='Room_all_agents', choices=['Room_all_agents', 'AirSim'], help="Dataset to use for training")
         self.parser.add_argument('--algo', type=str, default='simclr', choices=['simclr', 'scene-transfer'], help='Contrastive Learning framework')
         self.parser.add_argument('--n_pos', type=int, default=0, help="Number of positive examples to sample per anchor during training")
         self.parser.add_argument('--pos_thresh', type=float, default=0.8, help="Positive similarity threshold")
