@@ -271,11 +271,12 @@ class RoomAllAgentsDataset(ContrastiveDataset):
         self.metric = metric
         if metric in ['lidar', 'both']:
             assert mask in ['naive', 'binary', 'soft']
+            self.mask = mask
 
             # Define LiDAR readings mask
             rand_sample = self.annot_df.sample(n=1).iloc[0]
             w = np.zeros(rand_sample['laser_readings']['scan'].squeeze().shape[0])
-            match mask:
+            match self.mask:
                 case 'naive':
                     w += 1
                 case 'binary':
@@ -283,16 +284,18 @@ class RoomAllAgentsDataset(ContrastiveDataset):
                     w[64:164] += 1
                 case 'soft':
                     assert shift is not None
+                    self.shift = shift
+
                     # In FOV readings
                     w[64:164] += 1
                     # Out of FOV readings
                     x = np.linspace(0.0, 1.0, w[164:].shape[0])
-                    sigmoid = 1 - 0.9*(1 / (1+np.exp(-x + shift))) # Sigmoid 1.0 -> 0.1
+                    sigmoid = 1 - 0.9*(1 / (1+np.exp(-x + self.shift))) # Sigmoid 1.0 -> 0.1
                     w[164:] += sigmoid
                     w[63::-1] += sigmoid
                 
             # Mask and Normalizer    
-            self.mask = w.astype(np.float32)
+            self.mask_w = w.astype(np.float32)
             self.norm = np.sqrt(w.sum()).astype(np.float32)
 
         # Annotations
@@ -358,9 +361,9 @@ class RoomAllAgentsDataset(ContrastiveDataset):
         if self.mode == 'val':
             # In validation return all different scenes for visualziation
             scenes = self._scenes(record)
-            return anchor, scenes, pos_ex, lidar, gd, phi
+            return anchor, scenes, pos_ex, (lidar, gd, phi)
 
-        return anchor, pos_ex, lidar, gd, phi
+        return anchor, pos_ex, (lidar, gd, phi)
     
     def _scene_transfer_partition(self, idx: int):
         """
@@ -515,8 +518,8 @@ class RoomAllAgentsDataset(ContrastiveDataset):
                 batch_scans = all_lidar_scans[start:end, :]
 
                 # Pair-wise weighted LiDAR distances
-                weighted_scans = all_lidar_scans * np.sqrt(self.mask)
-                weighted_batch = batch_scans * np.sqrt(self.mask)
+                weighted_scans = all_lidar_scans * np.sqrt(self.mask_w)
+                weighted_batch = batch_scans * np.sqrt(self.mask_w)
                 lid_dist = cdist(weighted_batch, weighted_scans, metric='euclidean') / self.norm
                 
                 # Square matrix recontruction

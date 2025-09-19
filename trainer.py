@@ -23,6 +23,7 @@ from matplotlib import pyplot as plt; plt.switch_backend('agg')
 from matplotlib.figure import Figure
 from matplotlib.axes import Axes
 from tqdm import tqdm
+from contrastive import utils
 
 
 class ContrastiveTrainer(ABC):
@@ -301,7 +302,11 @@ class SingleGPUTrainer(ContrastiveTrainer):
         if self.train_ds.algo == 'scene-transfer':
             anchors, pos_ex, pos_sim_scores, neg_ex, neg_sim_scores = data       
         else:
-            anchors, pos_ex, lidars, gds, angles = data
+            anchors, pos_ex, info = data
+            if self.train_ds.__class__.__name__ == 'RoomAllAgentsDataset':
+                lidars, gds, angles = info
+            else:
+                raise NotImplementedError('Information retrieval for other datasets has not been implemented. yet!')
 
         # Calculate gradient accumulation steps
         B = anchors.shape[0]
@@ -333,14 +338,26 @@ class SingleGPUTrainer(ContrastiveTrainer):
                     del anc_embeddings, pos_embeddings, b_pos_sim_scores, \
                         neg_embeddings, b_neg_sim_scores
                 else:
-                    # Move info on the GPU
-                    b_lidars, b_gds, b_angles = lidars[start:end, ...].to(self.device), gds[start:end, ...].to(self.device), angles[start:end, ...].to(self.device)
+                    if self.train_ds.__class__.__name__ == 'RoomAllAgentsDataset':
+                        # Move info on the GPU
+                        b_lidars, b_gds, b_angles = lidars[start:end, ...].to(self.device), gds[start:end, ...].to(self.device), angles[start:end, ...].to(self.device)
 
-                    # Adaptive Contrastive Loss
-                    loss = self.loss_fn(anc_embeddings, pos_embeddings, lidars=b_lidars, gds=b_gds, angles=b_angles)
+                        # Adaptive Contrastive Loss
+                        # loss = self.loss_fn(anc_embeddings, pos_embeddings, lidars=b_lidars, gds=b_gds, angles=b_angles)
+                        loss = self.loss_fn(
+                            anc_embeddings, pos_embeddings, 
+                            utils.robot_nav_scores,
+                            self.train_ds.mask, self.train_ds.shift,
+                            lidars=b_lidars,
+                            gds=b_gds,
+                            angles=b_angles,
+                            metric=self.train_ds.metric
+                        )
 
-                    # Move back on the CPU and free space
-                    del anc_embeddings, pos_embeddings, b_lidars, b_gds, b_angles
+                        # Move back on the CPU and free space
+                        del anc_embeddings, pos_embeddings, b_lidars, b_gds, b_angles
+                    else:
+                        raise NotImplementedError('Adaptive SimCLR computation for other datasets has not been implemented. yet!')
 
                 # Backpropagation
                 loss = loss / accumulation_steps
@@ -368,7 +385,11 @@ class SingleGPUTrainer(ContrastiveTrainer):
                 if self.val_ds.algo == 'scene-transfer':
                     anchors, scenes, pos_ex, pos_sim_scores, neg_ex, neg_sim_scores = data
                 else:
-                    anchors, scenes, pos_ex, lidars, gds, angles = data       
+                    anchors, scenes, pos_ex, info = data
+                    if self.val_ds.__class__.__name__ == 'RoomAllAgentsDataset':
+                        lidars, gds, angles = info
+                    else:
+                        raise NotImplementedError('Information retrieval for other datasets has not been implemented, yet!')       
 
                 # Calculate accumulation steps
                 B = anchors.shape[0]
@@ -402,15 +423,28 @@ class SingleGPUTrainer(ContrastiveTrainer):
                             del anc_embeddings, pos_embeddings, b_pos_sim_scores, \
                                 neg_embeddings, b_neg_sim_scores
                         else:
-                            # Move info on the GPU
-                            b_lidars, b_gds, b_angles = lidars[start:end, ...].to(self.device), gds[start:end, ...].to(self.device), angles[start:end, ...].to(self.device)
+                            if self.train_ds.__class__.__name__ == 'RoomAllAgentsDataset':
+                                # Move info on the GPU
+                                b_lidars, b_gds, b_angles = lidars[start:end, ...].to(self.device), gds[start:end, ...].to(self.device), angles[start:end, ...].to(self.device)
 
-                            # Adaptive Contrastive Loss                            
-                            loss = self.loss_fn(anc_embeddings, pos_embeddings, lidars=b_lidars, gds=b_gds, angles=b_angles).detach().item()
-                            running_loss += loss / accumulation_steps
+                                # Adaptive Contrastive Loss
+                                # loss = self.loss_fn(anc_embeddings, pos_embeddings, lidars=b_lidars, gds=b_gds, angles=b_angles)
+                                loss = self.loss_fn(
+                                    anc_embeddings, pos_embeddings, 
+                                    utils.robot_nav_scores,
+                                    self.train_ds.mask, self.train_ds.shift,
+                                    lidars=b_lidars,
+                                    gds=b_gds,
+                                    angles=b_angles,
+                                    metric=self.train_ds.metric
+                                ).detach().item()
+                                running_loss += loss / accumulation_steps
 
-                            # Free space
-                            del anc_embeddings, pos_embeddings, b_lidars, b_gds, b_angles             
+                                # Move back on the CPU and free space
+                                del anc_embeddings, pos_embeddings, b_lidars, b_gds, b_angles
+                            else:
+                                raise NotImplementedError('Adaptive SimCLR computation for other datasets has not been implemented. yet!')
+             
                     
                     # Move back to the CPU
                     scene_embeddings = scene_embeddings.cpu()

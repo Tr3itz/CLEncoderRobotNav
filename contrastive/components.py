@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from abc import ABC, abstractmethod
+from typing import Callable
 
 """ TODO
 Make SimCLR loss general so that it implements general adaptive temperatures,
@@ -159,10 +160,10 @@ class SNNSimCLR(SoftNearestNeighbor):
     def __call__(
             self,
             anc_batch: torch.Tensor, 
-            pos_batch: torch.Tensor, 
-            lidars: torch.Tensor, 
-            gds: torch.Tensor, 
-            angles: torch.Tensor
+            pos_batch: torch.Tensor,
+            tau_fn: Callable,
+            *args,
+            **kwargs
         ):
 
         # Compute overall similarity matrix
@@ -185,7 +186,7 @@ class SNNSimCLR(SoftNearestNeighbor):
         neg_sims = sim_mat[neg_mask].view(N, -1)
 
         # In-batch negative scores
-        batch_tau = self._in_batch_scores(lidars, gds, angles)
+        batch_tau = tau_fn(*args, **kwargs)
         batch_tau_mat = batch_tau.repeat(2, 2)
         batch_tau_mat = batch_tau_mat[neg_mask].view(N, -1)
         batch_tau_mat = self.tau_min + (self.tau_max - self.tau_min)*batch_tau_mat
