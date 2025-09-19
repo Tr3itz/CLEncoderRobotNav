@@ -80,7 +80,7 @@ class ContrastiveTrainer(ABC):
         fig.savefig(f'{self.figs_dir}/epoch_{epoch + 1}.png', format='png')
         plt.close(fig)
 
-    def _intra_consistency(self, embeddings: torch.Tensor, fig: Figure, n_bins: int=20): # TODO: change to 10 bins
+    def _intra_consistency(self, embeddings: torch.Tensor, fig: Figure, n_bins: int=10):
         print('Intra-scene consistency visualization...')
 
         # Inter-scene consistency
@@ -110,7 +110,7 @@ class ContrastiveTrainer(ABC):
         # Intra-scene consistency box-plots
         ax = fig.add_subplot(3,1,1) 
         xticks = [f'{(1.0-(i-1)*bin_tol):.2f}-{(1.0-i*bin_tol):.2f}' for i in range(1, n_bins+1)]
-        ax.set_title(f'Intra-scene Consistency (metric={self.val_ds.metric})')
+        ax.set_title(f'Intra-scene Consistency')
         ax.boxplot(bins, orientation='vertical')
         ax.set_xticks(range(1, n_bins+1), xticks)
         ax.set_ylabel('Embedding Similarity')
@@ -138,19 +138,19 @@ class ContrastiveTrainer(ABC):
         cx.set_ylabel('Embedding Similarity')
         cx.boxplot([train_sim, ho_sim], tick_labels=['Training', 'Hold-out'], orientation='vertical')
 
-        # Train augmentations t-SNE
+        # Train scenes t-SNE
         dx = fig.add_subplot(3,2,5)
-        dx.set_title('t-SNE Embedding Space (Training Augmentations)')
+        dx.set_title('t-SNE Embedding Space (Training Scenes)')
         dx.grid()
         self._inter_tsne(embeddings=train_embeds, ax=dx)
 
-        # Hold-out augmentations t-SNE
+        # Hold-out scenes t-SNE
         ex = fig.add_subplot(3,2,6)
-        ex.set_title('t-SNE Embedding Space (Hold-out Augmentations)')
+        ex.set_title('t-SNE Embedding Space (Hold-out Scenes)')
         ex.grid()
-        self._inter_tsne(embeddings=ho_embeds, ax=ex)
+        self._inter_tsne(embeddings=ho_embeds, ax=ex, scenes='val')
 
-    def _inter_tsne(self, embeddings: torch.Tensor, ax: Axes):
+    def _inter_tsne(self, embeddings: torch.Tensor, ax: Axes, scenes:str ='train'):
         N_SAMPLES, N_AUGS, DIM = embeddings.shape
 
         # Prepare embeddings for t-SNE
@@ -175,11 +175,11 @@ class ContrastiveTrainer(ABC):
 
         # Create a legend manually
         handles = [
-            plt.Line2D([0], [0], marker='o', color='w', label='Anchor' if i == 0 else f'Augmentation {i}',
+            plt.Line2D([0], [0], marker='o', color='w', label=self.val_ds.SCENE_MAP[scenes][i],
                        markerfacecolor=cmap(i), markersize=8)
             for i in range(N_AUGS)
         ]
-        ax.legend(handles=handles, title='Augmentations')
+        ax.legend(handles=handles, title='Scenes')
 
 
 class SingleGPUTrainer(ContrastiveTrainer):
@@ -301,7 +301,7 @@ class SingleGPUTrainer(ContrastiveTrainer):
         if self.train_ds.algo == 'scene-transfer':
             anchors, pos_ex, pos_sim_scores, neg_ex, neg_sim_scores = data       
         else:
-            anchors, pos_ex, pos_sim_scores, lidars, gds, angles = data
+            anchors, pos_ex, lidars, gds, angles = data
 
         # Calculate gradient accumulation steps
         B = anchors.shape[0]
@@ -333,16 +333,14 @@ class SingleGPUTrainer(ContrastiveTrainer):
                     del anc_embeddings, pos_embeddings, b_pos_sim_scores, \
                         neg_embeddings, b_neg_sim_scores
                 else:
-                    # Move scores and info on the GPU
-                    b_pos_sim_scores = pos_sim_scores[start:end, ...].to(self.device)
+                    # Move info on the GPU
                     b_lidars, b_gds, b_angles = lidars[start:end, ...].to(self.device), gds[start:end, ...].to(self.device), angles[start:end, ...].to(self.device)
 
                     # Adaptive Contrastive Loss
-                    loss = self.loss_fn(anc_embeddings, pos_embeddings, b_pos_sim_scores, lidars=b_lidars, gds=b_gds, angles=b_angles)
+                    loss = self.loss_fn(anc_embeddings, pos_embeddings, lidars=b_lidars, gds=b_gds, angles=b_angles)
 
                     # Move back on the CPU and free space
-                    del anc_embeddings, pos_embeddings, b_pos_sim_scores, \
-                        b_lidars, b_gds, b_angles
+                    del anc_embeddings, pos_embeddings, b_lidars, b_gds, b_angles
 
                 # Backpropagation
                 loss = loss / accumulation_steps
@@ -369,10 +367,8 @@ class SingleGPUTrainer(ContrastiveTrainer):
                 # Unpack data
                 if self.val_ds.algo == 'scene-transfer':
                     anchors, scenes, pos_ex, pos_sim_scores, neg_ex, neg_sim_scores = data
-                elif self.val_ds.algo == 'simclr':
-                    anchors, scenes, pos_ex, pos_sim_scores, lidars, gds, angles = data       
                 else:
-                    anchors, pos_ex, pos_sim_scores, lidars, gds, angles = data
+                    anchors, scenes, pos_ex, lidars, gds, angles = data       
 
                 # Calculate accumulation steps
                 B = anchors.shape[0]
@@ -387,10 +383,8 @@ class SingleGPUTrainer(ContrastiveTrainer):
                         anc_embeddings = self._forward_and_clear(x=anchors[start:end, ...])
                         # Generate embeddings of postive examples
                         pos_embeddings = self._forward_and_clear(x=pos_ex[start:end, ...])
-
-                        if self.val_ds.algo != 'classic':
-                            # Generate embeddings of scenes
-                            scene_embeddings = self._forward_and_clear(x=scenes[start:end, ...])
+                        # Generate embeddings of scenes
+                        scene_embeddings = self._forward_and_clear(x=scenes[start:end, ...])
 
                         if self.val_ds.algo == 'scene-transfer':
                             # Generate embeddings of negative examples
@@ -408,53 +402,32 @@ class SingleGPUTrainer(ContrastiveTrainer):
                             del anc_embeddings, pos_embeddings, b_pos_sim_scores, \
                                 neg_embeddings, b_neg_sim_scores
                         else:
-                            # Move scores and info on the GPU
-                            b_pos_sim_scores = pos_sim_scores[start:end, ...].to(self.device)
+                            # Move info on the GPU
                             b_lidars, b_gds, b_angles = lidars[start:end, ...].to(self.device), gds[start:end, ...].to(self.device), angles[start:end, ...].to(self.device)
 
-                            # Adaptive Contrastive Loss (consider only hold-out augmentations)
-                            if self.val_ds.algo == 'simclr':
-                                loss = self.loss_fn(anc_embeddings, pos_embeddings, b_pos_sim_scores, lidars=b_lidars, gds=b_gds, angles=b_angles).detach().item()
-                            else:
-                                loss = self.loss_fn(anc_embeddings, pos_embeddings[:, 5:, ...], b_pos_sim_scores[:, 5:], lidars=b_lidars, gds=b_gds, angles=b_angles).detach().item()
+                            # Adaptive Contrastive Loss                            
+                            loss = self.loss_fn(anc_embeddings, pos_embeddings, lidars=b_lidars, gds=b_gds, angles=b_angles).detach().item()
                             running_loss += loss / accumulation_steps
 
                             # Free space
-                            del b_pos_sim_scores, b_lidars, b_gds, b_angles                
+                            del anc_embeddings, pos_embeddings, b_lidars, b_gds, b_angles             
                     
-                    if self.val_ds.algo != 'classic':
-                        # Move back to the CPU
-                        scene_embeddings = scene_embeddings.cpu()
+                    # Move back to the CPU
+                    scene_embeddings = scene_embeddings.cpu()
 
-                        # Dissect scenes from embeddings
-                        anc_scene = scene_embeddings[:, :1, ...]
-                        train_scenes = scene_embeddings[:, 1:len(self.val_ds.SCENES['train'])+1, ...]
-                        val_scenes = scene_embeddings[:, len(self.val_ds.SCENES['train'])+1:, ...]
+                    # Dissect scenes from embeddings
+                    anc_scene = scene_embeddings[:, 5, ...] # Office scene as anchor
+                    train_scenes = scene_embeddings[:, :len(self.val_ds.SCENES['train']), ...]
+                    val_scenes = scene_embeddings[:, len(self.val_ds.SCENES['train']):, ...]
 
-                        # For intra-scene consistency take the 1st scene (office)
-                        intra_embeddings.append(anc_scene.squeeze(dim=1))
+                    # For intra-scene consistency take the 1st scene (office)
+                    intra_embeddings.append(anc_scene.squeeze(dim=1))
                         
-                        # For inter-scene consistency analysis take all scenes
-                        inter_train.append(torch.cat([anc_scene, train_scenes], dim=1))
-                        inter_ho.append(torch.cat([anc_scene, val_scenes], dim=1))
+                    # For inter-scene consistency analysis take all scenes
+                    inter_train.append(train_scenes)
+                    inter_ho.append(val_scenes)
 
-                        del scene_embeddings, anc_scene, train_scenes, val_scenes
-                    else:
-                        # Move back to teh CPU
-                        anc_embeddings = anc_embeddings.cpu()
-                        pos_embeddings = pos_embeddings.cpu()
-
-                        # For intra-consistency analysis just take anchor embeddings 
-                        intra_embeddings.append(anc_embeddings) 
-
-                        # For inter-scene consistency analysis take anchors and augmentations embeddings
-                        ancs = anc_embeddings.unsqueeze(dim=1)
-                        augs = pos_embeddings
-                        inter_train.append(torch.cat([ancs, augs[:, :5, ...]], dim=1))
-                        inter_ho.append(torch.cat([ancs, augs[:, 5:, ...]], dim=1))
-
-                        # Free space
-                        del anc_embeddings, pos_embeddings
+                    del scene_embeddings, anc_scene, train_scenes, val_scenes
 
                 # Free space
                 torch.cuda.empty_cache()
@@ -597,7 +570,7 @@ class MultiGPUTrainer(ContrastiveTrainer):
         if self.train_ds.algo == 'scene-transfer':
             anchors, pos_ex, pos_sim_scores, neg_ex, neg_sim_scores = data       
         else:
-            anchors, pos_ex, pos_sim_scores, lidars, gds, angles = data
+            anchors, pos_ex, lidars, gds, angles = data
 
         # Calculate gradient accumulation steps
         B = anchors.shape[0]
@@ -629,16 +602,14 @@ class MultiGPUTrainer(ContrastiveTrainer):
                     del anc_embeddings, pos_embeddings, b_pos_sim_scores, \
                         neg_embeddings, b_neg_sim_scores
                 else:
-                    # Move scores and info on the GPU
-                    b_pos_sim_scores = pos_sim_scores[start:end, ...].to(self.device)
+                    # Move info on the GPU
                     b_lidars, b_gds, b_angles = lidars[start:end, ...].to(self.device), gds[start:end, ...].to(self.device), angles[start:end, ...].to(self.device)
 
                     # Adaptive Contrastive Loss
-                    loss = self.loss_fn(anc_embeddings, pos_embeddings, b_pos_sim_scores, lidars=b_lidars, gds=b_gds, angles=b_angles)
+                    loss = self.loss_fn(anc_embeddings, pos_embeddings, lidars=b_lidars, gds=b_gds, angles=b_angles)
 
                     # Move back on the CPU and free space
-                    del anc_embeddings, pos_embeddings, b_pos_sim_scores, \
-                        b_lidars, b_gds, b_angles
+                    del anc_embeddings, pos_embeddings, b_lidars, b_gds, b_angles
 
                 # Backpropagation
                 loss = loss / accumulation_steps
@@ -667,7 +638,7 @@ class MultiGPUTrainer(ContrastiveTrainer):
                 if self.train_ds.algo == 'scene-transfer':
                     anchors, scenes, pos_ex, pos_sim_scores, neg_ex, neg_sim_scores = data
                 elif self.train_ds.algo == 'simclr':
-                    anchors, scenes, pos_ex, pos_sim_scores, lidars, gds, angles = data        
+                    anchors, scenes, pos_ex, lidars, gds, angles = data        
                 else:
                     anchors, pos_ex, pos_sim_scores, lidars, gds, angles = data
 
@@ -684,10 +655,8 @@ class MultiGPUTrainer(ContrastiveTrainer):
                         anc_embeddings = self._forward_and_clear(x=anchors[start:end, ...])
                         # Generate embeddings of postive examples
                         pos_embeddings = self._forward_and_clear(x=pos_ex[start:end, ...])
-
-                        if self.val_ds.algo != 'classic':
-                            # Generate embeddings of scenes
-                            scene_embeddings = self._forward_and_clear(x=scenes[start:end, ...])
+                        # Generate embeddings of scenes
+                        scene_embeddings = self._forward_and_clear(x=scenes[start:end, ...])
 
                         if self.val_ds.algo == 'scene-transfer':
                             # Generate embeddings of negative examples
@@ -705,53 +674,32 @@ class MultiGPUTrainer(ContrastiveTrainer):
                             del anc_embeddings, pos_embeddings, b_pos_sim_scores, \
                                 neg_embeddings, b_neg_sim_scores
                         else:
-                            # Move scores and info on the GPU
-                            b_pos_sim_scores = pos_sim_scores[start:end, ...].to(self.device)
+                            # Move info on the GPU
                             b_lidars, b_gds, b_angles = lidars[start:end, ...].to(self.device), gds[start:end, ...].to(self.device), angles[start:end, ...].to(self.device)
 
-                            # Adaptive Contrastive Loss (consider only hold-out augmentations)
-                            if self.val_ds.algo == 'simclr':
-                                loss = self.loss_fn(anc_embeddings, pos_embeddings, b_pos_sim_scores, lidars=b_lidars, gds=b_gds, angles=b_angles).detach().cpu()
-                            else:
-                                loss = self.loss_fn(anc_embeddings, pos_embeddings[:, 5:, ...], b_pos_sim_scores[:, 5:], lidars=b_lidars, gds=b_gds, angles=b_angles).detach().cpu()
+                            # Adaptive Contrastive Loss (consider only hold-out augmentations)                            
+                            loss = self.loss_fn(anc_embeddings, pos_embeddings, lidars=b_lidars, gds=b_gds, angles=b_angles).detach().cpu()
                             running_loss += loss / accumulation_steps
 
                             # Free space
-                            del b_pos_sim_scores, b_lidars, b_gds, b_angles                
+                            del anc_embeddings, pos_embeddings, b_lidars, b_gds, b_angles                
                     
-                    if self.val_ds.algo == 'scene-transfer':
-                        # Move back to the CPU
-                        scene_embeddings = scene_embeddings.cpu()
+                    # Move back to the CPU
+                    scene_embeddings = scene_embeddings.cpu()
 
-                        # Dissect scenes from embeddings
-                        anc_scene = scene_embeddings[:, :1, ...]
-                        train_scenes = scene_embeddings[:, 1:len(self.val_ds.SCENES['train'])+1, ...]
-                        val_scenes = scene_embeddings[:, len(self.val_ds.SCENES['train'])+1:, ...]
+                    # Dissect scenes from embeddings
+                    anc_scene = scene_embeddings[:, 5, ...] # Office as anchor scene
+                    train_scenes = scene_embeddings[:, len(self.val_ds.SCENES['train']), ...]
+                    val_scenes = scene_embeddings[:, len(self.val_ds.SCENES['train']):, ...]
 
-                        # For intra-scene consistency take the 1st scene (office)
-                        intra_embeddings.append(anc_scene.squeeze(dim=1))
+                    # For intra-scene consistency take the 1st scene (office)
+                    intra_embeddings.append(anc_scene.squeeze(dim=1))
                         
-                        # For inter-scene consistency analysis take all scenes
-                        inter_train.append(torch.cat([anc_scene, train_scenes], dim=1))
-                        inter_ho.append(torch.cat([anc_scene, val_scenes], dim=1))
+                    # For inter-scene consistency analysis take all scenes
+                    inter_train.append(torch.cat([anc_scene, train_scenes], dim=1))
+                    inter_ho.append(torch.cat([anc_scene, val_scenes], dim=1))
 
-                        del scene_embeddings, anc_scene, train_scenes, val_scenes
-                    else:
-                        # Move back to teh CPU
-                        anc_embeddings = anc_embeddings.cpu()
-                        pos_embeddings = pos_embeddings.cpu()
-
-                        # For intra-consistency analysis just take anchor embeddings 
-                        intra_embeddings.append(anc_embeddings) 
-
-                        # For inter-scene consistency analysis take anchors and augmentations embeddings
-                        ancs = anc_embeddings.unsqueeze(dim=1)
-                        augs = pos_embeddings
-                        inter_train.append(torch.cat([ancs, augs[:, :5, ...]], dim=1))
-                        inter_ho.append(torch.cat([ancs, augs[:, 5:, ...]], dim=1))
-
-                        # Free space
-                        del anc_embeddings, pos_embeddings
+                    del scene_embeddings, anc_scene, train_scenes, val_scenes
 
                 pct = round(batch / len(self.val_dataloader), 2) * 100
                 if pct % 10 == 0:
