@@ -251,6 +251,21 @@ class RoomAllAgentsDataset(ContrastiveDataset):
             'val': [1, 2, 7]
         }
 
+        # Scene map
+        self.SCENE_MAP = {
+            'train': {
+                0: 'No wall',
+                1: 'No background',
+                2: 'Warehouse 1',
+                3: 'Warehouse 2'
+            },
+            'val': {
+                0: 'Stadium',
+                1: 'Office',
+                2: 'Warehouse 3'
+            } 
+        }
+
         # Similarity metric
         assert metric in ['lidar', 'goal', 'both']
         self.metric = metric
@@ -338,18 +353,14 @@ class RoomAllAgentsDataset(ContrastiveDataset):
         pos_ex = self.transforms(pos_img)
 
         # Retrieve additional information for the anchor
-        pos_sim_scores = np.ones(shape=(pos_ex.shape[0],))
         lidar, gd, phi = self._info(record=record)
 
         if self.mode == 'val':
-            scene1 = Image.open(f'{self.dir}/Room{R}/Setting{S}/{agent}/episode_{ep:04}/augmented_results/aug2_rgb_{step:05}.png')
-            scene1 = self.transforms(scene1)
-            scenes = torch.stack([scene1] + self._augs(record))
-
             # In validation return all different scenes for visualziation
-            return anchor, scenes, pos_ex, pos_sim_scores, lidar, gd, phi
+            scenes = self._scenes(record)
+            return anchor, scenes, pos_ex, lidar, gd, phi
 
-        return anchor, pos_ex, pos_sim_scores, lidar, gd, phi
+        return anchor, pos_ex, lidar, gd, phi
     
     def _scene_transfer_partition(self, idx: int):
         """
@@ -420,11 +431,8 @@ class RoomAllAgentsDataset(ContrastiveDataset):
         neg_sim_scores = sim_scores[neg_recs.index]
 
         if self.mode == 'val':
-            scene1 = Image.open(f'{self.dir}/Room{R}/Setting{S}/{agent}/episode_{ep:04}/augmented_results/aug2_rgb_{step:05}.png')
-            scene1 = self.transforms(scene1)
-            scenes = torch.stack([scene1] + self._augs(record))
-
             # In validation return all different scenes for visualziation
+            scenes = self._scenes(record)
             return anchor, scenes, pos_ex, pos_sim_scores, neg_ex, neg_sim_scores
         
         # Return both anchors and respective positive/negative partitions
@@ -626,7 +634,7 @@ class RoomAllAgentsDataset(ContrastiveDataset):
         theta_g = np.arctan2(dy, dx)
         return self._normalize_angle(theta_g - theta_r)
     
-    def _augs(self, record: pd.Series) -> list[torch.Tensor]:
+    def _scenes(self, record: pd.Series) -> list[torch.Tensor]:
         """
         Retrieve in-dataset augmentations of an anchor image.
         """
@@ -647,20 +655,14 @@ class RoomAllAgentsDataset(ContrastiveDataset):
         aug_3 = self.transforms(Image.open(f'{aug_dir}/aug5_rgb_{step:05}.png'))
         # Warehouse 2
         aug_4 = self.transforms(Image.open(f'{aug_dir}/aug6_rgb_{step:05}.png'))
+        # Stadium
+        aug_5 = self.transforms(Image.open(f'{aug_dir}/aug1_rgb_{step:05}.png'))
+        # Office
+        aug_6 = self.transforms(Image.open(f'{aug_dir}/aug2_rgb_{step:05}.png'))
+        # Warehouse 3
+        aug_7 = self.transforms(Image.open(f'{aug_dir}/aug7_rgb_{step:05}.png'))
 
-        # Training augmentations
-        augs = [aug_1, aug_2, aug_3, aug_4]
-
-        if self.mode == 'val':
-            # Stadium
-            aug_5 = self.transforms(Image.open(f'{aug_dir}/aug1_rgb_{step:05}.png'))
-            # Warehouse 3
-            aug_6 = self.transforms(Image.open(f'{aug_dir}/aug7_rgb_{step:05}.png'))
-
-            # Include hold-out scenes for validation
-            augs.extend([aug_5, aug_6])
-
-        return augs
+        return torch.stack([aug_1, aug_2, aug_3, aug_4, aug_5, aug_6, aug_7])
     
     def _info(self, idx: int=None, record: pd.Series=None) -> tuple:
         """
@@ -735,3 +737,102 @@ class RoomAllAgentsDataset(ContrastiveDataset):
             examples.append(self.transforms(ex_img))
 
         return torch.stack(examples)
+    
+
+class AirSimDataset(ContrastiveDataset):    
+    def __init__(
+            self,
+            dir: str,
+            batch_size: int,
+            micro_bsize: int,
+            transforms: v2,
+            algo: str='simclr',
+            n_pos: int=0,
+            pos_thresh: float=0.8,
+            n_neg: int=0,
+            neg_thresh: float=0.2,
+            augmentations: list=None,
+            mode: str='train',
+            multi_gpu: bool=False,
+            seed: int=42
+        ):
+        """
+        Torch implementation of Contrastive Dataset for AirSim Drone Navigation.
+        ----------
+        Parameters:
+        - dir: str            - directory of the dataset
+        - algo: str           - Contrastive Learning framework
+        - n_pos: int          - number of positive examples (scene-transfer framework)
+        - pos_thresh: float   - positive similarity threshold (scene-transfer framework)
+        - n_neg: int          - number of negative examples (scene-transfer framework)
+        - neg_thresh: float   - negative similarity threshold (scene-transfer framework)
+        - batch_size: int     - size of the batch returned by the DataLoader
+        - micro_bsize: int    - size of the micro-batch for gradient accumulation
+        - transforms: v2      - image transformations to apply
+        - augmentations       - additional augmentations for positive examples
+        - mode: str           - dataset mode (train or val)
+        - multi_gpu: bool     - whether the dataset is used for training a model on multiple GPUs
+        - seed: int           - random seed for reproducibility
+        """
+        super().__init__(
+            dir=dir,
+            transforms=transforms,
+            algo=algo,
+            n_pos=n_pos,
+            pos_thresh=pos_thresh,
+            n_neg=n_neg,
+            neg_thresh=neg_thresh,
+            batch_size=batch_size,
+            micro_bsize=micro_bsize,
+            augmentations=augmentations,
+            mode=mode,
+            multi_gpu=multi_gpu,
+            seed=seed
+        )
+        self.samples = []
+
+        print("Pre-caching dataset paths...")
+        # Trova tutte le cartelle anchor_XXXXX
+        anchor_dirs = sorted(glob.glob(os.path.join(self.dir, "anchor_*")))
+
+        for anchor_dir in anchor_dirs:
+            anchor_path = os.path.join(anchor_dir, "anchor.png")
+            positive_paths = glob.glob(os.path.join(anchor_dir, "positive_*.png"))
+
+            if os.path.exists(anchor_path) and positive_paths:
+                self.samples.append((anchor_path, positive_paths))
+
+        print(f"Found {len(self.samples)} valid anchor/positive pairs.")
+
+        if len(self.samples) == 0:
+            raise ValueError(f"No valid anchor/positive pairs found in {self.dir}")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        if self.algo == 'simclr':
+            return self._simclr_partition(idx)
+        else:
+            raise NotImplementedError(f'Contrastive Learning framework {self.algo} has not been implemented, yet.')        
+    
+    def _simclr_partition(self, idx: int):
+        anchor_path, positive_paths = self.samples[idx]
+
+        # Carica anchor
+        anchor_img = Image.open(anchor_path).convert('RGB')
+
+        # Scegli un positivo casuale dalla lista pre-caricata
+        positive_path = np.random.choice(positive_paths)
+        positive_img = Image.open(positive_path).convert('RGB')
+
+        # Applica trasformazioni se specificate
+        if self.transforms:
+            anchor_img = self.transforms(anchor_img)
+            positive_img = self.transforms(positive_img)
+
+        return {
+            'anchor': anchor_img,
+            'positive': positive_img,
+            'anchor_dir': os.path.basename(os.path.dirname(anchor_path))
+        }
