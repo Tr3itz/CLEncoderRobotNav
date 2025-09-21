@@ -137,7 +137,7 @@ def load_components(args):
     return model, train_dataset, val_dataset, loss_fn, optimizer
 
 
-def main_single_gpu(args, exp_dir: str, figs_dir: str):
+def main_single_gpu(args, exp_dir: str):
     # Load training objects
     model, train_ds, val_ds, loss_fn, optimizer = load_components(args)
 
@@ -149,15 +149,14 @@ def main_single_gpu(args, exp_dir: str, figs_dir: str):
         val_ds=val_ds,
         loss_fn=loss_fn,
         optimizer=optimizer,
-        exp_dir=exp_dir,
-        figs_dir=figs_dir
+        exp_dir=exp_dir
     )
 
     # Train the model
     trainer.train()
 
 
-def main_multi_gpu(rank: int, world_size: int, exp_dir: str, figs_dir: str, args):
+def main_multi_gpu(rank: int, world_size: int, exp_dir: str, args):
     try:
         # Set up distributed training
         ddp_setup(rank=rank, world_size=world_size)
@@ -189,8 +188,7 @@ def main_multi_gpu(rank: int, world_size: int, exp_dir: str, figs_dir: str, args
             val_ds=val_ds,
             loss_fn=loss_fn,
             optimizer=optimizer,
-            exp_dir=exp_dir,
-            figs_dir=figs_dir
+            exp_dir=exp_dir
         )
 
         # Barrier synchronizazion
@@ -223,11 +221,10 @@ if __name__ == '__main__':
 
     print(f'{"-"*30}\nContrastive Scene Transfer Encoder training experiment! (Framework: {args.algo})')
 
-    # Create directories of the experiment
+    # Create directory of the experiment
     now = datetime.now().strftime('%d-%m-%Y_%H-%M-%S')
-    exp_dir = f"./experiments/{args.algo}/{now}"  
-    figs_dir = f'{exp_dir}/val_figs'
-    os.makedirs(figs_dir, exist_ok=True)
+    exp_dir = f"./experiments/{args.algo}/{now}"
+    os.makedirs(exp_dir, exist_ok=True)  
 
     # Save the configuration
     conf.save_yaml(dir=exp_dir)
@@ -242,11 +239,11 @@ if __name__ == '__main__':
         if world_size > 1:
             mp.spawn(
                 main_multi_gpu, 
-                args=(world_size, exp_dir, figs_dir, args),
+                args=(world_size, exp_dir, args),
                 nprocs=world_size
             )
         else:
             print(f'[WARN] Multi-GPU training requested, but only {world_size} found. Switching to single GPU training...')
-            main_single_gpu(args, exp_dir, figs_dir)
+            main_single_gpu(args, exp_dir)
     else:
-        main_single_gpu(args, exp_dir, figs_dir)
+        main_single_gpu(args, exp_dir)

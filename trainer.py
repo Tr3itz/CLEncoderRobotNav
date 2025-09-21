@@ -14,7 +14,7 @@ from contrastive.encoder import ResNetEncoder
 from contrastive.components import SoftNearestNeighbor
 
 # Utils
-import os, gc
+import os, gc, shutil
 import numpy as np
 from math import ceil
 from abc import ABC, abstractmethod
@@ -35,8 +35,7 @@ class ContrastiveTrainer(ABC):
             val_ds: ContrastiveDataset,
             loss_fn: SoftNearestNeighbor,
             optimizer: optim.Optimizer,
-            exp_dir: str,
-            figs_dir: str
+            exp_dir: str
         ):
         super().__init__()
 
@@ -51,7 +50,10 @@ class ContrastiveTrainer(ABC):
 
         # Directories for logging
         self.exp_dir = exp_dir
-        self.figs_dir = figs_dir
+        self.figs_dir = f'{self.exp_dir}/val_figs'
+        self.check_dir = f'{self.exp_dir}/checkpoints'
+        os.makedirs(self.figs_dir, exist_ok=True)
+        os.makedirs(self.check_dir, exist_ok=True)
 
         # Training settings
         self.epochs = args.epochs
@@ -192,8 +194,7 @@ class SingleGPUTrainer(ContrastiveTrainer):
             val_ds: ContrastiveDataset,
             loss_fn: SoftNearestNeighbor,
             optimizer: optim.Optimizer,
-            exp_dir: str,
-            figs_dir: str
+            exp_dir: str
         ):
         super().__init__(
             args,
@@ -202,8 +203,7 @@ class SingleGPUTrainer(ContrastiveTrainer):
             val_ds,
             loss_fn,
             optimizer,
-            exp_dir,
-            figs_dir
+            exp_dir
         )
 
         # Retrieve DataLoaders
@@ -225,6 +225,7 @@ class SingleGPUTrainer(ContrastiveTrainer):
 
         # Pipeline
         train_loss_h, val_loss_h = [], []
+        min_val_loss, best_epoch = np.inf, 0
         for epoch in range(self.epochs):
 
             # Epoch header
@@ -262,12 +263,20 @@ class SingleGPUTrainer(ContrastiveTrainer):
                 val_loss = self._val_epoch(epoch)
                 train_loss_h.append(running_loss)
                 val_loss_h.append(val_loss)
+                
+                # Checkpoint if validation loss decreased
+                if val_loss < min_val_loss:
+                    torch.save(self.model.state_dict(), f'{self.check_dir}/{self.model.__class__.__name__}_epoch{epoch}.pt')
+                    min_val_loss = val_loss
+                    best_epoch = epoch
 
         # Close the log file
         log.close()
 
         # Train/validation loss plot
         ticks = [str(i*self.val_freq) for i in range(1, len(val_loss_h) + 1)]
+        places = [i for i in range(len(val_loss_h))]
+        step = max(1, len(val_loss_h)//10)
         fig = plt.figure(figsize=[15,10])
         fig.suptitle('SNN Loss History')
         ax = fig.gca()
@@ -275,13 +284,17 @@ class SingleGPUTrainer(ContrastiveTrainer):
         ax.plot(val_loss_h, label='Validation')
         ax.set_xlabel('Epochs')
         ax.set_ylabel('SNN')
-        ax.set_xticks([i for i in range(len(val_loss_h))], ticks)
+        ax.set_xticks(places[::step], ticks[::step])
         ax.legend()
         fig.savefig(f'{self.exp_dir}/loss_h.png', format='png')
         plt.close(fig)
 
-        # Save the model
-        torch.save(self.model.state_dict(), f'{self.exp_dir}/ResNetEncoder_state_dict.pt')
+        # Save best model
+        # torch.save(self.model.state_dict(), f'{self.exp_dir}/{self.model.__class__.__name__}_state_dict.pt')
+        shutil.copy2(
+            f'{self.check_dir}/{self.model.__class__.__name__}_epoch{best_epoch}.pt',
+            f'{self.exp_dir}/{self.model.__class__.__name__}_state_dict.pt'
+        )
 
     def _forward_and_clear(self, x: torch.Tensor):
         # Move tensor to the device
@@ -491,8 +504,7 @@ class MultiGPUTrainer(ContrastiveTrainer):
             val_ds: ContrastiveDataset,
             loss_fn: SoftNearestNeighbor,
             optimizer: optim.Optimizer,
-            exp_dir: str,
-            figs_dir: str
+            exp_dir: str
         ):
         super().__init__(
             args,
@@ -501,8 +513,7 @@ class MultiGPUTrainer(ContrastiveTrainer):
             val_ds,
             loss_fn,
             optimizer,
-            exp_dir,
-            figs_dir
+            exp_dir
         )
     
         # Node info
