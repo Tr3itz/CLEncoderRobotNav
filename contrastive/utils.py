@@ -1,8 +1,6 @@
 import torch
 
-# TODO: implement similarity scores for AirSimDataset
-
-def lidar_dists(lidars: torch.Tensor, mask: str='soft', shift: float=0.0):
+def lidar_sims(lidars: torch.Tensor, mask: str='soft', shift: float=0.0):
     """
     Compute in-batch lidar distances.
     """
@@ -35,9 +33,9 @@ def lidar_dists(lidars: torch.Tensor, mask: str='soft', shift: float=0.0):
     # Normalize distances to [0, 1]
     lid_dists /= norm
 
-    return lid_dists
+    return 1 - lid_dists
     
-def goal_diffs(gds: torch.Tensor, angles: torch.Tensor):
+def goal_sims(gds: torch.Tensor, angles: torch.Tensor):
     """
     Compute in-batch position differences w.r.t. the goal.
     """
@@ -49,7 +47,7 @@ def goal_diffs(gds: torch.Tensor, angles: torch.Tensor):
     ori_diffs = ((angles.unsqueeze(0) - angles.unsqueeze(1)) + torch.pi) % (2 * torch.pi) - torch.pi
     ori_diffs = torch.abs(ori_diffs) / torch.pi
 
-    return gd_diffs * ori_diffs
+    return 1 - gd_diffs*ori_diffs
 
     
 def robot_nav_scores(*args, lidars: torch.Tensor, gds: torch.Tensor, angles: torch.Tensor, metric: str='both'):
@@ -60,12 +58,12 @@ def robot_nav_scores(*args, lidars: torch.Tensor, gds: torch.Tensor, angles: tor
     # Distances between in-batch examples
     if metric == 'lidar':
         mask, shift = args
-        batch_scores = lidar_dists(lidars, mask, shift)
+        batch_scores = lidar_sims(lidars, mask, shift)
     elif metric == 'goal':
-        batch_scores = goal_diffs(gds, angles)
+        batch_scores = goal_sims(gds, angles)
     else:
         mask, shift = args
-        batch_scores = lidar_dists(lidars, mask, shift) *  goal_diffs(gds, angles)      
+        batch_scores = lidar_sims(lidars, mask, shift) *  goal_sims(gds, angles)      
 
     return batch_scores
 
