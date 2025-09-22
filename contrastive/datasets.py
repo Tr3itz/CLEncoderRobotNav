@@ -6,11 +6,11 @@ from torch.utils.data.distributed import DistributedSampler
 from torchvision.transforms import v2
 
 # Utils imports
-import os
+import os, glob
 import pickle
 import numpy as np
 import pandas as pd
-from scipy.spatial.distance import cdist
+from scipy.spatial.distance import cdist, pdist, squareform
 from PIL import Image
 from multiprocessing import shared_memory  
 from glob import glob
@@ -91,34 +91,15 @@ class ContrastiveDataset(Dataset, ABC):
         self.batch_size = batch_size
         self.micro_bsize = micro_bsize if micro_bsize > 0 else batch_size            
 
-        # Annotations dataframe
-        assert os.path.exists(self.dir)
-        try:
-            with open(f'{self.dir}/annotations.pkl', 'rb') as f:
-                self.annot_df = pickle.load(f)
-        except FileNotFoundError:
-            print(f"{'Creating annotations file...' if not self.multi_gpu else f'[GPU:{distr.get_rank()}] Retrieving additional info...'}")
-            self.annot_df = self._annot()
-
-        # Pandas methods will be used on this dataframe
-        assert isinstance(self.annot_df, pd.DataFrame), f'Annotations object is required to be a Pandas DataFrame. Found type {type(self.annot_df)}.'
-
     def __del__(self):
         if hasattr(self, '_shm'):
             self._shm.close()
 
-    def __len__(self):
-        return self.annot_df.shape[0]   
+    @abstractmethod
+    def __len__(self): pass   
     
     @abstractmethod
     def __getitem__(self): pass
-    
-    @abstractmethod
-    def _annot(self):
-        """
-        Create a global annotations file of the dataset.
-        """
-        pass
 
     @abstractmethod
     def _init_sim_matrix(self):
@@ -266,6 +247,18 @@ class RoomAllAgentsDataset(ContrastiveDataset):
             } 
         }
 
+        # Annotations dataframe
+        assert os.path.exists(self.dir)
+        try:
+            with open(f'{self.dir}/annotations.pkl', 'rb') as f:
+                self.annot_df = pickle.load(f)
+        except FileNotFoundError:
+            print(f"{'Creating annotations file...' if not self.multi_gpu else f'[GPU:{distr.get_rank()}] Retrieving additional info...'}")
+            self.annot_df = self._annot()
+
+        # Pandas methods will be used on this dataframe
+        assert isinstance(self.annot_df, pd.DataFrame), f'Annotations object is required to be a Pandas DataFrame. Found type {type(self.annot_df)}.'
+
         # Similarity metric
         assert metric in ['lidar', 'goal', 'both']
         self.metric = metric
@@ -315,6 +308,9 @@ class RoomAllAgentsDataset(ContrastiveDataset):
             else:   
                 self.sim_scores_mat = self._init_sim_matrix()
                 self.sim_scores_range = self.sim_scores_mat.max() - self.sim_scores_mat.min()
+
+    def __len__(self):
+        return self.annot_df.shape[0] 
 
     def __getitem__(self, idx: int):
         if self.algo == 'simclr':
@@ -548,50 +544,6 @@ class RoomAllAgentsDataset(ContrastiveDataset):
         np.fill_diagonal(sim_scores_mat, 1.0)
         return sim_scores_mat
     
-    def _init_sim_matrix_depr(self):
-        """
-        Initialize similarity matrix of samples in the dataset,
-        given additional information in self.annot_df. 
-        """
-
-        df = self.annot_df.copy()
-        shape = df.shape[0]
-
-        lid_dist_mat = np.ones(shape=(shape, shape), dtype=np.float32)
-        gd_mat = np.ones(shape=(shape, shape), dtype=np.float32)
-        ori_diff_mat = np.ones(shape=(shape, shape), dtype=np.float32)
-
-        # Compute distance matrices
-        if not self.multi_gpu: print(f"\nCOMPUTING {'TRAINING' if self.mode == 'train' else 'VALIDATION'} SIMILARITY SCORES MATRIX...")
-        for idx, obs in tqdm(df.iterrows(), unit='obs', disable=self.multi_gpu, total=shape):
-            # Observations info
-            lidar = obs['laser_readings']['scan'].squeeze()
-            gd = self._goal_distance(obs)
-            phi = self._relative_angle(obs)            
-            
-            if self.metric in ['lidar', 'both']:
-                # Weighted LiDAR eucledian distance
-                eucledian_dists = df['laser_readings'].map(lambda x: np.sqrt(np.sum(self.mask*(lidar - x['scan'].squeeze())**2)) / self.norm).to_numpy()
-                lid_dist_mat[idx] *= eucledian_dists
-            
-            if self.metric in ['goal', 'both']:
-                # Goal distance differences
-                gd_diffs = df.apply(lambda x: abs(gd - self._goal_distance(x)), axis=1).to_numpy()
-                gd_mat[idx] *= gd_diffs
-                # Differences in the orientation w.r.t. the goal
-                ori_diffs = df.apply(lambda x: np.abs(self._normalize_angle(phi - self._relative_angle(x))) / np.pi, axis=1)
-                ori_diff_mat[idx] *= ori_diffs
-
-        # Compute similarities
-        if self.metric == 'lidar':
-            sim_scores_mat = (1 - lid_dist_mat)
-        elif self.metric == 'goal':
-            sim_scores_mat = (1 - gd_mat)*(1 - ori_diff_mat)
-        else:
-            sim_scores_mat = (1 - lid_dist_mat)*(1 - gd_mat)*(1 - ori_diff_mat)
-        
-        return sim_scores_mat
-    
     def _opposite_corner(self, x: int | float, y: int | float) -> tuple[int]:
         """
         Return the corner on the opposite quadrant w.r.t (x, y).
@@ -637,7 +589,7 @@ class RoomAllAgentsDataset(ContrastiveDataset):
         theta_g = np.arctan2(dy, dx)
         return self._normalize_angle(theta_g - theta_r)
     
-    def _scenes(self, record: pd.Series) -> list[torch.Tensor]:
+    def _scenes(self, record: pd.Series) -> torch.Tensor:
         """
         Retrieve in-dataset augmentations of an anchor image.
         """
@@ -749,6 +701,7 @@ class AirSimDataset(ContrastiveDataset):
             batch_size: int,
             micro_bsize: int,
             transforms: v2,
+            train_frac: float,
             algo: str='simclr',
             n_pos: int=0,
             pos_thresh: float=0.8,
@@ -771,6 +724,7 @@ class AirSimDataset(ContrastiveDataset):
         - neg_thresh: float   - negative similarity threshold (scene-transfer framework)
         - batch_size: int     - size of the batch returned by the DataLoader
         - micro_bsize: int    - size of the micro-batch for gradient accumulation
+        - train_frac: float   - fraction of samples to use as training set
         - transforms: v2      - image transformations to apply
         - augmentations       - additional augmentations for positive examples
         - mode: str           - dataset mode (train or val)
@@ -792,26 +746,48 @@ class AirSimDataset(ContrastiveDataset):
             multi_gpu=multi_gpu,
             seed=seed
         )
-        self.samples = []
 
-        print("Pre-caching dataset paths...")
-        # Trova tutte le cartelle anchor_XXXXX
-        anchor_dirs = sorted(glob.glob(os.path.join(self.dir, "anchor_*")))
+        # Scenes partitions
+        self.SCENES = {
+            'train': [0, 2, 4],
+            'val': [1, 3, 5]
+        }
 
-        for anchor_dir in anchor_dirs:
-            anchor_path = os.path.join(anchor_dir, "anchor.png")
-            positive_paths = glob.glob(os.path.join(anchor_dir, "positive_*.png"))
+        # Scene map
+        self.SCENE_MAP = {
+            'train': {
+                0: 'Black bg',
+                1: 'Warehouse',
+                2: 'Outdoor 1',
+            },
+            'val': {
+                0: 'White bg',
+                1: 'Outdoor 2',
+                2: 'Outdoor 3'
+            } 
+        }
 
-            if os.path.exists(anchor_path) and positive_paths:
-                self.samples.append((anchor_path, positive_paths))
+        # Annotations DataFrame
+        self.annot_df = pd.read_csv(f'{self.dir}/annotations.csv')
+        split_idx = int(self.annot_df.shape[0]*train_frac)
+        if self.mode == 'train':
+            self.annot_df = self.annot_df[self.annot_df['anchor_id'] < split_idx]
+        else:
+            self.annot_df = self.annot_df[self.annot_df['anchor_id'] >= split_idx]
+        self.annot_df.reset_index(inplace=True, drop=True)
 
-        print(f"Found {len(self.samples)} valid anchor/positive pairs.")
-
-        if len(self.samples) == 0:
-            raise ValueError(f"No valid anchor/positive pairs found in {self.dir}")
+        # Initialize similarity matrix
+        if self.mode == 'val' or self.algo == 'scene-transfer':
+            if self.multi_gpu:
+                if distr.get_rank() == 0:
+                    self._shm, self.sim_scores_mat = self._shared_sim_mat()
+                    self.sim_scores_range = self.sim_scores_mat.max() - self.sim_scores_mat.min()
+            else:   
+                self.sim_scores_mat = self._init_sim_matrix()
+                self.sim_scores_range = self.sim_scores_mat.max() - self.sim_scores_mat.min()
 
     def __len__(self):
-        return len(self.samples)
+        return self.annot_df.shape[0] 
 
     def __getitem__(self, idx):
         if self.algo == 'simclr':
@@ -819,23 +795,83 @@ class AirSimDataset(ContrastiveDataset):
         else:
             raise NotImplementedError(f'Contrastive Learning framework {self.algo} has not been implemented, yet.')        
     
-    def _simclr_partition(self, idx: int):
-        anchor_path, positive_paths = self.samples[idx]
+    def _simclr_partition(self, idx: int, penalty: float=0.3):        
+        # Anchor info
+        record = self.annot_df.iloc[idx]
+        position = record[['pos_x', 'pos_y', 'pos_z']].to_numpy(dtype=np.float32)    # Position
+        velocity = record[['vel_x', 'vel_y', 'vel_z']].to_numpy(dtype=np.float32)    # Linear velocity
+        quaternion = record[['q_w', 'q_x', 'q_y', 'q_z']].to_numpy(dtype=np.float32) # Tilt/gyroscope        
 
-        # Carica anchor
-        anchor_img = Image.open(anchor_path).convert('RGB')
+       # Select the anchor scene uniformly 
+        scenes = self.SCENES[self.mode]
+        n = len(scenes)
+        anchor_scene = np.random.choice(scenes).item()
+        
+        # Select the positive scene with a weighted distribution
+        probs = np.ones(n)
+        probs[scenes.index(anchor_scene)] = penalty
+        probs /= probs.sum() 
+        pos_scene = np.random.choice(scenes, p=probs).item() 
+        
+        # Load images from `augmented_results`
+        anchor_img = Image.open(f'{self.dir}/anchor_{idx:06}/positive_{anchor_scene}.png')
+        pos_img = Image.open(f'{self.dir}/anchor_{idx:06}/positive_{pos_scene}.png')
+        
+        # Convert images to tensors
+        anchor = self.transforms(anchor_img)
+        pos_ex = self.transforms(pos_img)
 
-        # Scegli un positivo casuale dalla lista pre-caricata
-        positive_path = np.random.choice(positive_paths)
-        positive_img = Image.open(positive_path).convert('RGB')
+        if self.mode == 'val':
+            # In validation return all different scenes for visualziation
+            scenes = self._scenes(idx)
+            return anchor, scenes, pos_ex, (position, velocity, quaternion)
 
-        # Applica trasformazioni se specificate
-        if self.transforms:
-            anchor_img = self.transforms(anchor_img)
-            positive_img = self.transforms(positive_img)
+        return anchor, pos_ex, (position, velocity, quaternion)
+    
+    def _init_sim_matrix(self, Wp: float=0.25, Wv: float=0.75, Wpos: float=0.6, Wrot: float=0.4):
+        if not self.multi_gpu: print(f"\nCOMPUTING {'TRAINING' if self.mode == 'train' else 'VALIDATION'} SIMILARITY SCORES MATRIX...")
 
-        return {
-            'anchor': anchor_img,
-            'positive': positive_img,
-            'anchor_dir': os.path.basename(os.path.dirname(anchor_path))
-        }
+        # Privileged information
+        positions = self.annot_df[['pos_x', 'pos_y', 'pos_z']].to_numpy(dtype=np.float32)
+        velocities = self.annot_df[['vel_x', 'vel_y', 'vel_z']].to_numpy(dtype=np.float32)
+        quaternions = self.annot_df[['q_w', 'q_x', 'q_y', 'q_z']].to_numpy(dtype=np.float32)
+
+        n_samples = self.annot_df.shape[0]
+        sim_scores_mat = np.zeros((n_samples, n_samples), dtype=np.float32)
+
+        # Position similarity
+        pos_dist_mat = squareform(pdist(positions, 'euclidean'))
+        vel_magnitudes = np.linalg.norm(velocities, axis=1)
+        avg_vel_mat = np.add.outer(vel_magnitudes, vel_magnitudes) / 2.0
+        dynamic_scale_mat = Wp / (1 + avg_vel_mat * Wv)
+        pos_sim_mat = np.exp(-dynamic_scale_mat * pos_dist_mat)
+
+        # Rotation similarity
+        norms = np.linalg.norm(quaternions, axis=1, keepdims=True)
+        quaternions_normalized = quaternions / norms
+        rot_sim_mat = np.abs(quaternions_normalized @ quaternions_normalized.T)
+
+        # Weighted combination
+        sim_scores_mat = (pos_sim_mat * Wpos) + (rot_sim_mat * Wrot)
+        np.fill_diagonal(sim_scores_mat, 1.0)
+
+        return sim_scores_mat
+
+    def _scenes(self, idx):
+        """
+        Retrieve in-dataset scenes of an anchor image.
+        """
+        # Digital image
+        anchor = self.transforms(Image.open(f'{self.dir}/anchor_{idx:06}/anchor.png'))
+        # Black background
+        scene1 = self.transforms(Image.open(f'{self.dir}/anchor_{idx:06}/positive_0.png'))
+        # White background
+        scene2 = self.transforms(Image.open(f'{self.dir}/anchor_{idx:06}/positive_1.png'))
+        # Warehouse (random)
+        scene3 = self.transforms(Image.open(f'{self.dir}/anchor_{idx:06}/positive_2.png'))
+        # Random outdoors
+        scene4 = self.transforms(Image.open(f'{self.dir}/anchor_{idx:06}/positive_3.png'))
+        scene5 = self.transforms(Image.open(f'{self.dir}/anchor_{idx:06}/positive_4.png'))
+        scene6 = self.transforms(Image.open(f'{self.dir}/anchor_{idx:06}/positive_5.png'))
+
+        return torch.stack([anchor, scene1, scene2, scene3, scene4, scene5, scene6])
