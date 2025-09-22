@@ -67,7 +67,7 @@ def get_dataset(args) -> tuple[ContrastiveDataset]:
             val_room=args.val_room,
             metric=args.metric,
             mask=args.mask,
-            shift = args.shift,
+            shift=args.shift,
             n_pos=args.n_pos,
             pos_thresh=args.pos_thresh,
             n_neg=args.n_neg,
@@ -86,7 +86,7 @@ def get_dataset(args) -> tuple[ContrastiveDataset]:
             val_room=args.val_room,
             metric=args.metric,
             mask=args.mask,
-            shift = args.shift,
+            shift=args.shift,
             n_pos=args.n_pos,
             pos_thresh=args.pos_thresh,
             n_neg=args.n_neg,
@@ -104,6 +104,7 @@ def get_dataset(args) -> tuple[ContrastiveDataset]:
             batch_size=args.batch_size,
             micro_bsize=args.micro_bsize,
             transforms=transforms,
+            train_frac=args.train_frac,
             mode='train',
             multi_gpu=args.multi_gpu
         )
@@ -114,6 +115,7 @@ def get_dataset(args) -> tuple[ContrastiveDataset]:
             batch_size=args.batch_size,
             micro_bsize=args.micro_bsize,
             transforms=transforms,
+            train_frac=args.train_frac,
             mode='val',
             multi_gpu=args.multi_gpu
         )
