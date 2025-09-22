@@ -221,7 +221,8 @@ class SingleGPUTrainer(ContrastiveTrainer):
 
         # Logging
         log = open(f'{self.exp_dir}/log.txt', 'w')
-        batch_update = len(self.train_dataloader) // 5
+        n_batches = len(self.train_dataloader) // self.train_ds.accumulation_steps
+        log_interval = max(1, n_batches // 5)
 
         # Pipeline
         train_loss_h, val_loss_h = [], []
@@ -234,25 +235,42 @@ class SingleGPUTrainer(ContrastiveTrainer):
             log.write(header + '\n')
 
             self.model.train()
-            running_loss = 0.0
-            for batch, data in enumerate(tqdm(self.train_dataloader, unit='batch', leave=True)):
+            batch = 0
+            running_loss = 0.0            
+            for mini_batch, data in enumerate(tqdm(self.train_dataloader, unit='mini_batch', leave=True)):           
                 # TRAIN step
-                running_loss += self._train_step(data)
+                loss = self._train_step(data)
 
-                if batch % batch_update == (batch_update - 1):
-                    update = f'Computed {(batch):4}/{len(self.train_dataloader)} batches - Avg Adaptive Contrastive Loss: {(running_loss/batch):.5f}'
-                    tqdm.write(update)
-                    log.write(update + '\n')
+                # Backpropagation
+                loss = loss / self.train_ds.accumulation_steps
+                self.scaler.scale(loss).backward()
+                running_loss += loss.detach().item()
+
+                if (mini_batch+1) % self.train_ds.accumulation_steps == 0 or (mini_batch+1) == len(self.train_dataloader):
+                    # Optimizer/scaler update
+                    self.scaler.unscale_(self.optimizer) # Uscale gradients before clipping
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+
+                    # Clear gradients
+                    self.optimizer.zero_grad()
+                    batch = mini_batch // self.train_ds.accumulation_steps
+
+                    if batch > 0 and batch % log_interval == 0:
+                        update = f'Computed {(batch):4}/{n_batches} batches - Avg Adaptive Contrastive Loss: {(running_loss/batch):.5f}'
+                        tqdm.write(update)
+                        log.write(update + '\n')     
 
                 # Free space
-                torch.cuda.empty_cache()    
+                torch.cuda.empty_cache()   
 
             # Update learning rate
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = self.lr * (1 - (epoch / self.epochs))
 
             # Epoch foot
-            running_loss /= len(self.train_dataloader)
+            running_loss /= n_batches
             foot = f"\nEnd of EPOCH {epoch} - Avg Loss: {running_loss:5f}"
             print(foot)
             log.write(foot + '\n')
@@ -308,9 +326,6 @@ class SingleGPUTrainer(ContrastiveTrainer):
         return out
 
     def _train_step(self, data):
-        # Clear gradients
-        self.optimizer.zero_grad()
-
         # Unpack data
         if self.train_ds.algo == 'scene-transfer':
             anchors, pos_ex, pos_sim_scores, neg_ex, neg_sim_scores = data       
@@ -321,83 +336,62 @@ class SingleGPUTrainer(ContrastiveTrainer):
             else:
                 positions, velocities, quaternions = info
 
-        # Calculate gradient accumulation steps
-        B = anchors.shape[0]
-        accumulation_steps = ceil(B / self.train_ds.micro_bsize)
-        
-        running_loss = 0.0
-        for i in range(accumulation_steps):
-            start = i * self.train_ds.micro_bsize
-            end = min(B, start + self.train_ds.micro_bsize)
+        with autocast(device_type='cuda'):       
+            # Generate embeddings of anchors
+            anc_embeddings = self._forward_and_clear(x=anchors)
+            # Generate embeddings of postive examples
+            pos_embeddings = self._forward_and_clear(x=pos_ex)
 
-            with autocast(device_type='cuda'):       
-                # Generate embeddings of anchors
-                anc_embeddings = self._forward_and_clear(x=anchors[start:end, ...])
-                # Generate embeddings of postive examples
-                pos_embeddings = self._forward_and_clear(x=pos_ex[start:end, ...])
+            if self.train_ds.algo == 'scene-transfer':
+                # Generate embeddings of negative examples
+                neg_embeddings = self._forward_and_clear(x=neg_ex)
 
-                if self.train_ds.algo == 'scene-transfer':
-                    # Generate embeddings of negative examples
-                    neg_embeddings = self._forward_and_clear(x=neg_ex[start:end, ...])
+                # Move scores on the GPU
+                pos_sim_scores = pos_sim_scores.to(self.device)
+                neg_sim_scores = neg_sim_scores.to(self.device)
 
-                    # Move scores on the GPU
-                    b_pos_sim_scores = pos_sim_scores[start:end, ...].to(self.device)
-                    b_neg_sim_scores = neg_sim_scores[start:end, ...].to(self.device)
+                # Adaptive Contrastive Loss
+                loss = self.loss_fn(anc_embeddings, pos_embeddings, pos_sim_scores, neg_batch=neg_embeddings, neg_sim_scores=neg_sim_scores)
+
+                # Move back on the CPU and free space
+                del anc_embeddings, pos_embeddings, pos_sim_scores, \
+                    neg_embeddings, neg_sim_scores
+            else:
+                if self.train_ds.__class__.__name__ == 'RoomAllAgentsDataset':
+                    # Move info on the GPU
+                    lidars, gds, angles = lidars.to(self.device), gds.to(self.device), angles.to(self.device)
 
                     # Adaptive Contrastive Loss
-                    loss = self.loss_fn(anc_embeddings, pos_embeddings, b_pos_sim_scores, neg_batch=neg_embeddings, neg_sim_scores=b_neg_sim_scores)
+                    loss = self.loss_fn(
+                        anc_embeddings, pos_embeddings, 
+                        utils.robot_nav_scores,
+                        self.train_ds.mask, self.train_ds.shift,
+                        lidars=lidars,
+                        gds=gds,
+                        angles=angles,
+                        metric=self.train_ds.metric
+                    )
 
                     # Move back on the CPU and free space
-                    del anc_embeddings, pos_embeddings, b_pos_sim_scores, \
-                        neg_embeddings, b_neg_sim_scores
+                    del anc_embeddings, pos_embeddings, lidars, gds, angles
                 else:
-                    if self.train_ds.__class__.__name__ == 'RoomAllAgentsDataset':
-                        # Move info on the GPU
-                        b_lidars, b_gds, b_angles = lidars[start:end, ...].to(self.device), gds[start:end, ...].to(self.device), angles[start:end, ...].to(self.device)
+                    # Move info on the GPU
+                    positions, velocities, quaternions = positions.to(self.device), velocities.to(self.device), quaternions.to(self.device)
 
-                        # Adaptive Contrastive Loss
-                        # loss = self.loss_fn(anc_embeddings, pos_embeddings, lidars=b_lidars, gds=b_gds, angles=b_angles)
-                        loss = self.loss_fn(
-                            anc_embeddings, pos_embeddings, 
-                            utils.robot_nav_scores,
-                            self.train_ds.mask, self.train_ds.shift,
-                            lidars=b_lidars,
-                            gds=b_gds,
-                            angles=b_angles,
-                            metric=self.train_ds.metric
-                        )
+                    # Adaptive Contrastive Loss
+                    loss = self.loss_fn(
+                        anc_embeddings, pos_embeddings, 
+                        utils.airsim_scores,
+                        0.25, 0.75, 0.6, 0.4,  # Wp, Wv, Wpos, Wrot
+                        positions=positions,
+                        velocities=velocities,
+                        quaternions=quaternions
+                    )
 
-                        # Move back on the CPU and free space
-                        del anc_embeddings, pos_embeddings, b_lidars, b_gds, b_angles
-                    else:
-                        # Move info on the GPU
-                        b_positions, b_velocities, b_quaternions = positions[start:end, ...].to(self.device), velocities[start:end, ...].to(self.device), quaternions[start:end, ...].to(self.device)
+                    # Move back on the CPU and free space
+                    del anc_embeddings, pos_embeddings, positions, velocities, quaternions
 
-                        # Adaptive Contrastive Loss
-                        loss = self.loss_fn(
-                            anc_embeddings, pos_embeddings, 
-                            utils.airsim_scores,
-                            0.25, 0.75, 0.6, 0.4,  # Wp, Wv, Wpos, Wrot
-                            positions=b_positions,
-                            velocities=b_velocities,
-                            quaternions=b_quaternions
-                        )
-
-                        # Move back on the CPU and free space
-                        del anc_embeddings, pos_embeddings, b_positions, b_velocities, b_quaternions
-
-                # Backpropagation
-                loss = loss / accumulation_steps
-                self.scaler.scale(loss).backward()
-                running_loss += loss.detach()
-        
-        # Optimizer/scaler update
-        self.scaler.unscale_(self.optimizer) # Uscale gradients before clipping
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
-
-        return running_loss.item()
+                return loss
 
     def _val_epoch(self, epoch):
         running_loss = 0.0
@@ -417,74 +411,66 @@ class SingleGPUTrainer(ContrastiveTrainer):
                         lidars, gds, angles = info
                     else:
                         positions, velocities, quaternions = info       
-
-                # Calculate accumulation steps
-                B = anchors.shape[0]
-                accumulation_steps = ceil(B / self.val_ds.micro_bsize)
-
-                for i in range(accumulation_steps):
-                    start = i * self.val_ds.micro_bsize
-                    end = min(B, start + self.val_ds.micro_bsize)
                     
-                    with autocast(device_type='cuda'):
-                        # Generate embeddings of anchors
-                        anc_embeddings = self._forward_and_clear(x=anchors[start:end, ...])
-                        # Generate embeddings of postive examples
-                        pos_embeddings = self._forward_and_clear(x=pos_ex[start:end, ...])
-                        # Generate embeddings of scenes
-                        scene_embeddings = self._forward_and_clear(x=scenes[start:end, ...])
+                with autocast(device_type='cuda'):
+                    # Generate embeddings of anchors
+                    anc_embeddings = self._forward_and_clear(x=anchors)
+                    # Generate embeddings of postive examples
+                    pos_embeddings = self._forward_and_clear(x=pos_ex)
+                    # Generate embeddings of scenes
+                    scene_embeddings = self._forward_and_clear(x=scenes)
 
-                        if self.val_ds.algo == 'scene-transfer':
-                            # Generate embeddings of negative examples
-                            neg_embeddings = self._forward_and_clear(x=neg_ex[start:end, ...])
+                    if self.val_ds.algo == 'scene-transfer':
+                        # Generate embeddings of negative examples
+                        neg_embeddings = self._forward_and_clear(x=neg_ex)
 
-                            # Move scores on the GPU
-                            b_pos_sim_scores = pos_sim_scores[start:end, ...].to(self.device)
-                            b_neg_sim_scores = neg_sim_scores[start:end, ...].to(self.device)
+                        # Move scores on the GPU
+                        pos_sim_scores = pos_sim_scores.to(self.device)
+                        neg_sim_scores = neg_sim_scores.to(self.device)
+
+                        # Adaptive Contrastive Loss
+                        loss = self.loss_fn(anc_embeddings, pos_embeddings, pos_sim_scores, neg_batch=neg_embeddings, neg_sim_scores=neg_sim_scores).detach().item()
+                        running_loss += loss / self.val_ds.accumulation_steps
+
+                        # Free space
+                        del anc_embeddings, pos_embeddings, pos_sim_scores, \
+                            neg_embeddings, neg_sim_scores
+                    else:
+                        if self.train_ds.__class__.__name__ == 'RoomAllAgentsDataset':
+                            # Move info on the GPU
+                            lidars, gds, angles = lidars.to(self.device), gds.to(self.device), angles.to(self.device)
 
                             # Adaptive Contrastive Loss
-                            loss = self.loss_fn(anc_embeddings, pos_embeddings, b_pos_sim_scores, neg_batch=neg_embeddings, neg_sim_scores=b_neg_sim_scores).detach().item()
-                            running_loss += loss / accumulation_steps
+                            loss = self.loss_fn(
+                                anc_embeddings, pos_embeddings, 
+                                utils.robot_nav_scores,
+                                self.train_ds.mask, self.train_ds.shift,
+                                lidars=lidars,
+                                gds=gds,
+                                angles=angles,
+                                metric=self.train_ds.metric
+                            ).detach().item()
+                            running_loss += loss / self.val_ds.accumulation_steps
 
-                            # Free space
-                            del anc_embeddings, pos_embeddings, b_pos_sim_scores, \
-                                neg_embeddings, b_neg_sim_scores
+                            # Move back on the CPU and free space
+                            del anc_embeddings, pos_embeddings, lidars, gds, angles
                         else:
-                            if self.train_ds.__class__.__name__ == 'RoomAllAgentsDataset':
-                                # Move info on the GPU
-                                b_lidars, b_gds, b_angles = lidars[start:end, ...].to(self.device), gds[start:end, ...].to(self.device), angles[start:end, ...].to(self.device)
+                            # Move info on the GPU
+                            positions, velocities, quaternions = positions.to(self.device), velocities.to(self.device), quaternions.to(self.device)
 
-                                # Adaptive Contrastive Loss
-                                # loss = self.loss_fn(anc_embeddings, pos_embeddings, lidars=b_lidars, gds=b_gds, angles=b_angles)
-                                loss = self.loss_fn(
-                                    anc_embeddings, pos_embeddings, 
-                                    utils.robot_nav_scores,
-                                    self.train_ds.mask, self.train_ds.shift,
-                                    lidars=b_lidars,
-                                    gds=b_gds,
-                                    angles=b_angles,
-                                    metric=self.train_ds.metric
-                                ).detach().item()
-                                running_loss += loss / accumulation_steps
+                            # Adaptive Contrastive Loss
+                            loss = self.loss_fn(
+                                anc_embeddings, pos_embeddings, 
+                                utils.airsim_scores,
+                                0.25, 0.75, 0.6, 0.4,  # Wp, Wv, Wpos, Wrot
+                                positions=positions,
+                                velocities=velocities,
+                                quaternions=quaternions
+                            ).detach().item()
+                            running_loss += loss / self.val_ds.accumulation_steps
 
-                                # Move back on the CPU and free space
-                                del anc_embeddings, pos_embeddings, b_lidars, b_gds, b_angles
-                            else:
-                                 # Move info on the GPU
-                                b_positions, b_velocities, b_quaternions = positions[start:end, ...].to(self.device), velocities[start:end, ...].to(self.device), quaternions[start:end, ...].to(self.device)
-
-                                # Adaptive Contrastive Loss
-                                loss = self.loss_fn(
-                                    anc_embeddings, pos_embeddings, 
-                                    utils.airsim_scores,
-                                    0.25, 0.75, 0.6, 0.4,  # Wp, Wv, Wpos, Wrot
-                                    positions=b_positions,
-                                    velocities=b_velocities,
-                                    quaternions=b_quaternions
-                                )
-
-                                # Move back on the CPU and free space
-                                del anc_embeddings, pos_embeddings, b_positions, b_velocities, b_quaternions             
+                            # Move back on the CPU and free space
+                            del anc_embeddings, pos_embeddings, positions, velocities, quaternions             
                     
                     # Move back to the CPU
                     scene_embeddings = scene_embeddings.cpu()
@@ -511,7 +497,7 @@ class SingleGPUTrainer(ContrastiveTrainer):
                 # Free space
                 torch.cuda.empty_cache()
                 
-        running_loss /= len(self.val_dataloader)
+        running_loss /= len(self.val_dataloader) // self.val_ds.accumulation_steps
         print(f'End of VALIDATION - Avg Soft Nearest Neighbor Loss: {running_loss:.5f}')
 
         # Prepare tensors for plotting

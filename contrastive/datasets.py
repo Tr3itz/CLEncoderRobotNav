@@ -87,9 +87,10 @@ class ContrastiveDataset(Dataset, ABC):
         self.multi_gpu = multi_gpu
 
         # Batch and Micro-batch
-        assert micro_bsize == 0 or batch_size % micro_bsize == 0, f'Invalid micro-batch size: batch={batch_size}, micro-batch={micro_bsize}'
+        assert micro_bsize == 0 or batch_size % micro_bsize == 0, f'Invalid mini-batch size: batch={batch_size}, mini-batch={micro_bsize}'
         self.batch_size = batch_size
-        self.micro_bsize = micro_bsize if micro_bsize > 0 else batch_size            
+        self.mini_bsize = micro_bsize if micro_bsize > 0 else batch_size   
+        self.accumulation_steps = self.batch_size // self.mini_bsize
 
     def __del__(self):
         if hasattr(self, '_shm'):
@@ -151,7 +152,7 @@ class ContrastiveDataset(Dataset, ABC):
         if self.multi_gpu:
             return DataLoader(
                 dataset=self,
-                batch_size=self.batch_size,
+                batch_size=self.mini_bsize,
                 num_workers=num_workers,
                 pin_memory=True,
                 drop_last=(self.mode == 'train'),
@@ -160,7 +161,7 @@ class ContrastiveDataset(Dataset, ABC):
         else:
             return DataLoader(
                 dataset=self,
-                batch_size=self.batch_size,
+                batch_size=self.mini_bsize,
                 shuffle=(self.mode == 'train'),
                 num_workers=num_workers,
                 pin_memory=True,
