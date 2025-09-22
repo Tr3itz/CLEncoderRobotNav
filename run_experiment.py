@@ -225,7 +225,7 @@ if __name__ == '__main__':
 
     # Create directory of the experiment
     now = datetime.now().strftime('%d-%m-%Y_%H-%M-%S')
-    exp_dir = f"./experiments/{args.algo}/{now}"
+    exp_dir = f"./experiments/{args.dataset}/{args.algo}/{now}"
     os.makedirs(exp_dir, exist_ok=True)  
 
     # Save the configuration
