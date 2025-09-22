@@ -11,7 +11,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 # Contrastive imports
 from contrastive.datasets import ContrastiveDataset
 from contrastive.encoder import ResNetEncoder
-from contrastive.components import SoftNearestNeighbor
+from contrastive.components import SNNCosineSimilarityLoss, SNNSimCLR
 
 # Utils
 import os, gc, shutil
@@ -24,6 +24,7 @@ from matplotlib.figure import Figure
 from matplotlib.axes import Axes
 from tqdm import tqdm
 from contrastive import utils
+from typing import Callable
 
 
 class ContrastiveTrainer(ABC):
@@ -33,7 +34,7 @@ class ContrastiveTrainer(ABC):
             model: ResNetEncoder,
             train_ds: ContrastiveDataset,
             val_ds: ContrastiveDataset,
-            loss_fn: SoftNearestNeighbor,
+            loss_fn: Callable,
             optimizer: optim.Optimizer,
             exp_dir: str
         ):
@@ -192,7 +193,7 @@ class SingleGPUTrainer(ContrastiveTrainer):
             model: ResNetEncoder,
             train_ds: ContrastiveDataset,
             val_ds: ContrastiveDataset,
-            loss_fn: SoftNearestNeighbor,
+            loss_fn: Callable,
             optimizer: optim.Optimizer,
             exp_dir: str
         ):
@@ -520,7 +521,7 @@ class MultiGPUTrainer(ContrastiveTrainer):
             model: ResNetEncoder,
             train_ds: ContrastiveDataset,
             val_ds: ContrastiveDataset,
-            loss_fn: SoftNearestNeighbor,
+            loss_fn: Callable,
             optimizer: optim.Optimizer,
             exp_dir: str
         ):
