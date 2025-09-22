@@ -319,7 +319,7 @@ class SingleGPUTrainer(ContrastiveTrainer):
             if self.train_ds.__class__.__name__ == 'RoomAllAgentsDataset':
                 lidars, gds, angles = info
             else:
-                raise NotImplementedError('Information retrieval for other datasets has not been implemented. yet!')
+                positions, velocities, quaternions = info
 
         # Calculate gradient accumulation steps
         B = anchors.shape[0]
@@ -370,7 +370,21 @@ class SingleGPUTrainer(ContrastiveTrainer):
                         # Move back on the CPU and free space
                         del anc_embeddings, pos_embeddings, b_lidars, b_gds, b_angles
                     else:
-                        raise NotImplementedError('Adaptive SimCLR computation for other datasets has not been implemented. yet!')
+                        # Move info on the GPU
+                        b_positions, b_velocities, b_quaternions = positions[start:end, ...].to(self.device), velocities[start:end, ...].to(self.device), quaternions[start:end, ...].to(self.device)
+
+                        # Adaptive Contrastive Loss
+                        loss = self.loss_fn(
+                            anc_embeddings, pos_embeddings, 
+                            utils.airsim_scores,
+                            0.25, 0.75, 0.6, 0.4,  # Wp, Wv, Wpos, Wrot
+                            positions=b_positions,
+                            velocities=b_velocities,
+                            quaternions=b_quaternions
+                        )
+
+                        # Move back on the CPU and free space
+                        del anc_embeddings, pos_embeddings, b_positions, b_velocities, b_quaternions
 
                 # Backpropagation
                 loss = loss / accumulation_steps
@@ -402,7 +416,7 @@ class SingleGPUTrainer(ContrastiveTrainer):
                     if self.val_ds.__class__.__name__ == 'RoomAllAgentsDataset':
                         lidars, gds, angles = info
                     else:
-                        raise NotImplementedError('Information retrieval for other datasets has not been implemented, yet!')       
+                        positions, velocities, quaternions = info       
 
                 # Calculate accumulation steps
                 B = anchors.shape[0]
@@ -456,16 +470,34 @@ class SingleGPUTrainer(ContrastiveTrainer):
                                 # Move back on the CPU and free space
                                 del anc_embeddings, pos_embeddings, b_lidars, b_gds, b_angles
                             else:
-                                raise NotImplementedError('Adaptive SimCLR computation for other datasets has not been implemented. yet!')
-             
+                                 # Move info on the GPU
+                                b_positions, b_velocities, b_quaternions = positions[start:end, ...].to(self.device), velocities[start:end, ...].to(self.device), quaternions[start:end, ...].to(self.device)
+
+                                # Adaptive Contrastive Loss
+                                loss = self.loss_fn(
+                                    anc_embeddings, pos_embeddings, 
+                                    utils.airsim_scores,
+                                    0.25, 0.75, 0.6, 0.4,  # Wp, Wv, Wpos, Wrot
+                                    positions=b_positions,
+                                    velocities=b_velocities,
+                                    quaternions=b_quaternions
+                                )
+
+                                # Move back on the CPU and free space
+                                del anc_embeddings, pos_embeddings, b_positions, b_velocities, b_quaternions             
                     
                     # Move back to the CPU
                     scene_embeddings = scene_embeddings.cpu()
 
                     # Dissect scenes from embeddings
-                    anc_scene = scene_embeddings[:, 5, ...] # Office scene as anchor
-                    train_scenes = scene_embeddings[:, :len(self.val_ds.SCENES['train']), ...]
-                    val_scenes = scene_embeddings[:, len(self.val_ds.SCENES['train']):, ...]
+                    if self.val_ds.__class__.__name__ == 'RoomAllAgentsDataset':
+                        anc_scene = scene_embeddings[:, 5, ...] # Office scene as anchor
+                        train_scenes = scene_embeddings[:, :len(self.val_ds.SCENES['train']), ...]
+                        val_scenes = scene_embeddings[:, len(self.val_ds.SCENES['train']):, ...]
+                    else:
+                        anc_scene = scene_embeddings[:, 1, ...] # Digital as anchor
+                        train_scenes = scene_embeddings[:, 1:len(self.val_ds.SCENES['train'])+1, ...]
+                        val_scenes = scene_embeddings[:, len(self.val_ds.SCENES['train'])+1:, ...]
 
                     # For intra-scene consistency take the 1st scene (office)
                     intra_embeddings.append(anc_scene.squeeze(dim=1))

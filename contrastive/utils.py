@@ -1,5 +1,7 @@
 import torch
 
+# TODO: implement similarity scores for AirSimDataset
+
 def lidar_dists(lidars: torch.Tensor, mask: str='soft', shift: float=0.0):
     """
     Compute in-batch lidar distances.
@@ -52,7 +54,7 @@ def goal_diffs(gds: torch.Tensor, angles: torch.Tensor):
     
 def robot_nav_scores(*args, lidars: torch.Tensor, gds: torch.Tensor, angles: torch.Tensor, metric: str='both'):
     """
-    Compute in-batch negative scores for anchors.
+    Compute in-batch negative scores for RoomAllAgents anchors.
     """
 
     # Distances between in-batch examples
@@ -66,3 +68,27 @@ def robot_nav_scores(*args, lidars: torch.Tensor, gds: torch.Tensor, angles: tor
         batch_scores = lidar_dists(lidars, mask, shift) *  goal_diffs(gds, angles)      
 
     return batch_scores
+
+def airsim_scores(*args, positions: torch.Tensor, velocities: torch.Tensor, quaternions: torch.Tensor):
+    """
+    Compute in-batch negative scores for AirSim anchors.
+    """
+    Wp, Wv, Wpos, Wrot = args
+
+    # Position similarity
+    pos_dist_mat = torch.cdist(positions, positions, p=2.0)
+    vel_magnitudes = torch.linalg.norm(velocities, dim=1)
+    avg_vel_mat = (vel_magnitudes[:, None] + vel_magnitudes) / 2.0
+    dynamic_scale_mat = Wp / (1 + avg_vel_mat * Wv)
+    pos_sim_mat = torch.exp(-dynamic_scale_mat * pos_dist_mat)
+
+    # Rotation similarity
+    norms = torch.linalg.norm(quaternions, dim=1, keepdim=True)
+    quaternions_normalized = quaternions / norms
+    rot_sim_mat = torch.abs(quaternions_normalized @ quaternions_normalized.T)
+
+    # Weighted combination
+    sim_scores_mat = (pos_sim_mat * Wpos) + (rot_sim_mat * Wrot)
+    sim_scores_mat.fill_diagonal_(1.0)
+
+    return sim_scores_mat
