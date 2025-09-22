@@ -130,7 +130,6 @@ def load_components(args):
     # Model, Loss and Optimizer
     model = MODEL[args.model]()
     loss_fn = LOSS_FN[args.algo](
-        args=args,
         tau_min=args.min_tau,
         tau_max=args.max_tau
     )
