@@ -30,7 +30,7 @@ class Configurations:
         self.parser.add_argument('--shift', type=float, help="Shift of the sigmoid for soft LiDAR masking")
 
         # AirSim dataset settings
-        self.parser.add_argument('--train_frac', type=float, default=0.8, help='Fraction of the dataset to use as training set.')
+        self.parser.add_argument('--val_env', type=str, default='CityEnviron', help="AirSim environment to use as validation set of images")
 
         # Model, Loss, Optimizer and Scheduler settings
         self.parser.add_argument('--model', type=str, default='resnet50', choices=['resnet50', 'mbnv3'], help="Backbone encoder to use")

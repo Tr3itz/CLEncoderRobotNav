@@ -104,7 +104,7 @@ def get_dataset(args) -> tuple[ContrastiveDataset]:
             batch_size=args.batch_size,
             micro_bsize=args.micro_bsize,
             transforms=transforms,
-            train_frac=args.train_frac,
+            val_env=args.val_env,
             mode='train',
             multi_gpu=args.multi_gpu
         )
@@ -115,7 +115,7 @@ def get_dataset(args) -> tuple[ContrastiveDataset]:
             batch_size=args.batch_size,
             micro_bsize=args.micro_bsize,
             transforms=transforms,
-            train_frac=args.train_frac,
+            val_env=args.val_env,
             mode='val',
             multi_gpu=args.multi_gpu
         )

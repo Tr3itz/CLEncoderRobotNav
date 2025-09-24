@@ -702,7 +702,7 @@ class AirSimDataset(ContrastiveDataset):
             batch_size: int,
             micro_bsize: int,
             transforms: v2,
-            train_frac: float,
+            val_env: str,
             algo: str='simclr',
             n_pos: int=0,
             pos_thresh: float=0.8,
@@ -725,7 +725,7 @@ class AirSimDataset(ContrastiveDataset):
         - neg_thresh: float   - negative similarity threshold (scene-transfer framework)
         - batch_size: int     - size of the batch returned by the DataLoader
         - micro_bsize: int    - size of the micro-batch for gradient accumulation
-        - train_frac: float   - fraction of samples to use as training set
+        - val_env: str        - AirSim environment to use as validation set of images
         - transforms: v2      - image transformations to apply
         - augmentations       - additional augmentations for positive examples
         - mode: str           - dataset mode (train or val)
@@ -770,11 +770,11 @@ class AirSimDataset(ContrastiveDataset):
 
         # Annotations DataFrame
         self.annot_df = pd.read_csv(f'{self.dir}/annotations.csv')
-        split_idx = int(self.annot_df.shape[0]*train_frac)
+        assert val_env in self.annot_df['env_name'].unique()
         if self.mode == 'train':
-            self.annot_df = self.annot_df[self.annot_df['anchor_id'] < split_idx]
+            self.annot_df = self.annot_df[self.annot_df['env_name'] != val_env]
         else:
-            self.annot_df = self.annot_df[self.annot_df['anchor_id'] >= split_idx]
+            self.annot_df = self.annot_df[self.annot_df['env_name'] == val_env]
         self.annot_df.reset_index(inplace=True, drop=True)
 
         # Initialize similarity matrix
