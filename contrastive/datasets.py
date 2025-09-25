@@ -6,7 +6,7 @@ from torch.utils.data.distributed import DistributedSampler
 from torchvision.transforms import v2
 
 # Utils imports
-import os, glob
+import os, glob, platform
 import pickle
 import numpy as np
 import pandas as pd
@@ -251,7 +251,7 @@ class RoomAllAgentsDataset(ContrastiveDataset):
         # Annotations dataframe
         assert os.path.exists(self.dir)
         try:
-            with open(f'{self.dir}/annotations.pkl', 'rb') as f:
+            with open(os.path.join(self.dir, 'annotations.pkl'), 'rb') as f:
                 self.annot_df = pickle.load(f)
         except FileNotFoundError:
             print(f"{'Creating annotations file...' if not self.multi_gpu else f'[GPU:{distr.get_rank()}] Retrieving additional info...'}")
@@ -449,37 +449,38 @@ class RoomAllAgentsDataset(ContrastiveDataset):
         # Create a global annotations file
         annot_df = []
         for room in range(1, len(glob(f'{self.dir}/*'))+1):
-            room_dir = f'{self.dir}/Room{room}'
+            room_dir = os.path.join(self.dir, rf'Room{room}')
 
             for setting in range(1, len(glob(f'{room_dir}/*'))+1):
-                set_dir = f'{room_dir}/Setting{setting}'
+                set_dir = os.path.join(room_dir, rf'Setting{setting}') 
 
                 for agent_dir in glob(f'{set_dir}/*'):
-                    agent = agent_dir.split('/')[-1]
+                    agent = agent_dir.split('\\')[-1] if platform.system() == 'Windows' else agent_dir.split('/')
 
-                    for ep_dir in sorted(glob(f'{agent_dir}/episode_*')):     
+                    for ep, ep_dir in enumerate(sorted(glob(f'{agent_dir}/episode_*'))):     
 
-                        ep = ep_dir.split('/')[-1]
+                        ep_str = ep_dir.split('\\')[-1] if platform.system() == 'Windows' else ep_dir.split('/')
                         try:
-                            with open(f'{ep_dir}/{ep}.pkl', 'rb') as f:
+                            with open(os.path.join(ep_dir, rf'{ep_str}.pkl'), 'rb') as f:
                                 df = pickle.load(f)
 
-                                if ep not in df['episode'].unique():
-                                    print(f'[WARN] Fixed episode in DataFrame {ep_dir}/{ep:04}.pkl not matching the name of the directory.')
-                                    df['episode'] =  np.ones(df.shape[0], dtype=int) * ep
+                                if (ep+1) not in df['episode'].unique():
+                                    print(f'[WARN] Fixed episode in DataFrame {ep_dir}/{ep_str:04}.pkl not matching the name of the directory.')
+                                    df['episode'] =  np.ones(df.shape[0], dtype=int) * (ep+1)
 
                                 df.insert(0, 'agent', [agent for _ in range(df.shape[0])])
                                 df.insert(0, 'setting', np.ones(df.shape[0], dtype=int) * setting)
                                 df.insert(0, 'room', np.ones(df.shape[0], dtype=int) * room)
                                 annot_df.append(df)
                         except FileNotFoundError:
-                            print(f'[WARN] File not found: {ep_dir}/{ep}.pkl')
+                            print(f'[WARN] File not found: {ep_dir}/{ep_str}.pkl')
 
         annot_df = pd.concat(annot_df)
         annot_df.index = list(range(0, annot_df.shape[0]))
 
         if not self.multi_gpu:
-            annot_df.to_pickle(f'{self.dir}/annotations.pkl')
+            path = os.path.join(self.dir, 'annotations.pkl')
+            annot_df.to_pickle(path)
 
         return annot_df
     

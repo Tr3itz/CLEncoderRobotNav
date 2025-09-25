@@ -62,7 +62,7 @@ def get_dataset(args) -> tuple[ContrastiveDataset]:
     if args.dataset == 'Room_all_agents':
         # Training dataset
         train_dataset = RoomAllAgentsDataset(
-            dir=f'{args.datasets_path}/{args.dataset}',
+            dir=os.path.join(rf'{args.datasets_path}', rf'{args.dataset}'),
             algo=args.algo,
             val_room=args.val_room,
             metric=args.metric,
@@ -81,7 +81,7 @@ def get_dataset(args) -> tuple[ContrastiveDataset]:
 
         # Validation dataset
         val_dataset = RoomAllAgentsDataset(
-            dir=f'{args.datasets_path}/{args.dataset}',
+            dir=os.path.join(rf'{args.datasets_path}', rf'{args.dataset}'),
             algo=args.algo,
             val_room=args.val_room,
             metric=args.metric,
@@ -100,7 +100,7 @@ def get_dataset(args) -> tuple[ContrastiveDataset]:
     else:
         # Training dataset
         train_dataset = AirSimDataset(
-            dir=f'{args.datasets_path}/{args.dataset}',
+            dir=os.path.join(rf'{args.datasets_path}', rf'{args.dataset}'),
             batch_size=args.batch_size,
             micro_bsize=args.micro_bsize,
             transforms=transforms,
@@ -111,7 +111,7 @@ def get_dataset(args) -> tuple[ContrastiveDataset]:
 
         # Validation dataset
         val_dataset = AirSimDataset(
-            dir=f'{args.datasets_path}/{args.dataset}',
+            dir=os.path.join(rf'{args.datasets_path}', rf'{args.dataset}'),
             batch_size=args.batch_size,
             micro_bsize=args.micro_bsize,
             transforms=transforms,
@@ -224,7 +224,7 @@ if __name__ == '__main__':
 
     # Create directory of the experiment
     now = datetime.now().strftime('%d-%m-%Y_%H-%M-%S')
-    exp_dir = f"./experiments/{args.dataset}/{args.algo}/{now}"
+    exp_dir = rf'./experiments/{args.dataset}/{args.algo}/{now}'
     os.makedirs(exp_dir, exist_ok=True)  
 
     # Save the configuration

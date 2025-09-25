@@ -51,8 +51,8 @@ class ContrastiveTrainer(ABC):
 
         # Directories for logging
         self.exp_dir = exp_dir
-        self.figs_dir = f'{self.exp_dir}/val_figs'
-        self.check_dir = f'{self.exp_dir}/checkpoints'
+        self.figs_dir = os.path.join(self.exp_dir, 'val_figs')
+        self.check_dir = os.path.join(self.exp_dir, 'checkpoints')
         os.makedirs(self.figs_dir, exist_ok=True)
         os.makedirs(self.check_dir, exist_ok=True)
 
@@ -74,14 +74,15 @@ class ContrastiveTrainer(ABC):
         # Figure
         fig = plt.figure(figsize=[25,30])
         plt.axis('off')
-        fig.suptitle(f'Validation epoch {epoch + 1}')
+        fig.suptitle(f'Validation epoch {epoch}')
 
         # Plots
         self._intra_consistency(embeddings=intra_embeddings, fig=fig)
         self._inter_consistency(train_embeds=inter_train, ho_embeds=inter_ho, fig=fig)
 
         # Save and close figure
-        fig.savefig(f'{self.figs_dir}/epoch_{epoch + 1}.png', format='png')
+        
+        fig.savefig(os.path.join(self.figs_dir, f'epochs_{epoch}.png'), format='png')
         plt.close(fig)
 
     def _intra_consistency(self, embeddings: torch.Tensor, fig: Figure, n_bins: int=10):
@@ -285,7 +286,7 @@ class SingleGPUTrainer(ContrastiveTrainer):
                 
                 # Checkpoint if validation loss decreased
                 if val_loss < min_val_loss:
-                    torch.save(self.model.state_dict(), f'{self.check_dir}/{self.model.__class__.__name__}_epoch{epoch}.pt')
+                    torch.save(self.model.state_dict(), os.path.join(self.check_dir, rf'{self.model.__class__.__name__}_epoch{epoch}.pt'))
                     min_val_loss = val_loss
                     best_epoch = epoch
 
@@ -305,14 +306,13 @@ class SingleGPUTrainer(ContrastiveTrainer):
         ax.set_ylabel('SNN')
         ax.set_xticks(places[::step], ticks[::step])
         ax.legend()
-        fig.savefig(f'{self.exp_dir}/loss_h.png', format='png')
+        fig.savefig(os.path.join(self.exp_dir, 'loss_h.png'), format='png')
         plt.close(fig)
 
         # Save best model
-        # torch.save(self.model.state_dict(), f'{self.exp_dir}/{self.model.__class__.__name__}_state_dict.pt')
         shutil.copy2(
-            f'{self.check_dir}/{self.model.__class__.__name__}_epoch{best_epoch}.pt',
-            f'{self.exp_dir}/{self.model.__class__.__name__}_state_dict.pt'
+            os.path.join(self.check_dir, rf'{self.model.__class__.__name__}_epoch{best_epoch}.pt'),
+            os.path.join(self.exp_dir, rf'{self.model.__class__.__name__}_state_dict.pt')
         )
 
     def _forward_and_clear(self, x: torch.Tensor):

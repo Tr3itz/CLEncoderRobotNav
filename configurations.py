@@ -1,5 +1,5 @@
 import argparse
-import yaml
+import yaml, os
 
 class Configurations:
     def __init__(self):
@@ -47,7 +47,7 @@ class Configurations:
         return self.args
 
     def save_yaml(self, dir: str):
-        with open(f'{dir}/config.yaml', 'w') as f:
+        with open(os.path.join(dir, 'config.yaml'), 'w') as f:
             yaml.dump(vars(self.args), f)
 
 if __name__=='__main__':
