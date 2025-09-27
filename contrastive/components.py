@@ -1,132 +1,41 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from abc import ABC, abstractmethod
+from typing import Callable
+       
 
-
-class SoftNearestNeighbor(nn.Module, ABC):
-    def __init__(self, args, tau_min: float=0.1, tau_max: float=1.0):
+class SNNCosineSimilarityLoss(nn.Module):
+    def __init__(self, tau_min: float=0.1, tau_max: float=1.0):
         """
-        Adaptive Soft Nearest Neighbor objective base class.
+        SNN objective based on Cosine Similarity of embeddings.
         ----------
         Parameters:
-        - metric: str        - metric to use for computing similarity between examples (lidar, goal, both)
-        - tau_min: float     - adaptive temperature minimum value
-        - tau_max: float     - adaptive temperature maximum value
+            - tau_min: float - minimum adaptive temperature value
+            - tau_max: float - maximum adaptive temperature value
         """
-        super().__init__()
-
-        # Metric
-        self.metric = args.metric
-        if self.metric in ['lidar', 'both']:
-            self.mask = args.mask
-            self.shift = args.shift
 
         # Temperatures range
         self.tau_min, self.tau_max = tau_min, tau_max
-
-    @abstractmethod
-    def __call__(self): pass
-    
-    def _lidar_dists(self, lidars: torch.Tensor):
-        """
-        Compute in-batch lidar distances.
-        """
-
-        if not hasattr(self, 'mask_w') and hasattr(self, 'mask'):
-            # Define LiDAR readings mask
-            w = torch.zeros(size=(lidars.shape[1],))
-            match self.mask:
-                case 'naive':
-                    w += 1
-                case 'binary':
-                    # In FOV readings
-                    w[64:164] += 1
-                case 'soft':
-                    # In FOV readings
-                    w[64:164] += 1
-                    # Out of FOV readings
-                    x = torch.linspace(0.0, 1.0, w[164:].shape[0])
-                    s_right = 1 - 0.9*(1 / (1+torch.exp(-x + self.shift))) # Sigmoid 1.0 -> 0.1
-                    s_left = 0.1 + 0.9*(1 / (1+torch.exp(-x + self.shift))) # Sigmoid 0.1 -> 1.0
-                    w[164:] += s_right
-                    w[:64] += s_left
-                
-            # Mask and Normalizer    
-            self.mask_w = w.to(lidars.get_device())
-            self.norm = torch.sqrt(w.sum())
-
-        # Weighted eucledian distances between in-batch anchors lidar readings
-        lid_dists = (lidars.unsqueeze(0) - lidars.unsqueeze(1)).pow(2) * self.mask_w        
-        lid_dists = lid_dists.sum(dim=-1).sqrt() 
-        # Normalize distances to [0, 1]
-        lid_dists /= self.norm
-
-        return lid_dists
-    
-    def _goal_diffs(self, gds: torch.Tensor, angles: torch.Tensor):
-        """
-        Compute in-batch position differences w.r.t. the goal.
-        """
-
-        # Differences between in-batch anchors goal distances
-        gd_diffs = torch.abs(gds.unsqueeze(0) - gds.unsqueeze(1))
-
-        # Differences between in-batch anchors orientations w.r.t. the goal
-        ori_diffs = ((angles.unsqueeze(0) - angles.unsqueeze(1)) + torch.pi) % (2 * torch.pi) - torch.pi
-        ori_diffs = torch.abs(ori_diffs) / torch.pi
-
-        return gd_diffs * ori_diffs
-
-    
-    def _in_batch_scores(self, lidars: torch.Tensor, gds: torch.Tensor, angles: torch.Tensor):
-        """
-        Compute in-batch negative scores for anchors.
-        """
-
-        # Distances between in-batch examples
-        if self.metric == 'lidar':
-            batch_scores = self._lidar_dists(lidars)
-        elif self.metric == 'goal':
-            batch_scores = self._goal_diffs(gds, angles)
-        else:
-            batch_scores = self._lidar_dists(lidars) *  self._goal_diffs(gds, angles)      
-
-        return batch_scores
-       
-
-class SNNCosineSimilarityLoss(SoftNearestNeighbor):
-    def __init__(self, args, tau_min: float=0.1, tau_max: float=1.0):
-        """
-        SNN objective based on Cosine Similarity of embeddings.
-        """
-        super().__init__(
-            args=args,
-            tau_min=tau_min,
-            tau_max=tau_max
-        )
 
     def __call__(
             self,
             anc_batch: torch.Tensor, 
             pos_batch: torch.Tensor,
             pos_sim_scores: torch.Tensor, 
-            lidars: torch.Tensor=None, 
-            gds: torch.Tensor=None, 
-            angles: torch.Tensor=None,
-            neg_batch: torch.Tensor=None, 
-            neg_sim_scores: torch.Tensor=None
+            neg_batch: torch.Tensor, 
+            neg_sim_scores: torch.Tensor
         ):
         """
+        Parameters:
+            - anc_batch: torch.Tensor      - anchor images
+            - pos_batch: torch.Tensor      - positive examples
+            - pos_sim_scores: torch.Tensor - psimilarity scores between anchors and positives
+            - neg_batch: torch.Tensor      - negative examples
+            - neg_sim_scores: torch.Tensor - psimilarity scores between anchors and negatives
+        ----------
         New implementation maps similarities/distances in [tau_min, tau_max]:
 
-                tau(i,j) = tau_min + (tau_max-tau_min) * d_ij/d_max
-        ----------
-        IMPORTANT:
-        - positive examples use distances as adaptive temperatures 
-          (the closer the sample, the higher the numerator)
-        - negative examples use similarities as adaptive temperatures 
-          (the more similar, the less impact on the denominator) 
+                tau(i,j) = tau_min + (tau_max-tau_min) * d_ij/d_max 
         """ 
         if torch.isnan(anc_batch).any() or torch.isnan(pos_batch).any():
             print("FATAL: NaN detected in network outputs (anc_batch or pos_batch).")
@@ -135,66 +44,51 @@ class SNNCosineSimilarityLoss(SoftNearestNeighbor):
         pos_sims = F.cosine_similarity(anc_batch.unsqueeze(1), pos_batch, dim=-1)
         pos_tau = self.tau_min + (self.tau_max - self.tau_min) * (1-pos_sim_scores)
         pos_sims = torch.exp(pos_sims / pos_tau)  # removed '-' in front of similarity
+        
+        # Embedding similarities between anchors and positive examples
+        neg_sims = F.cosine_similarity(anc_batch.unsqueeze(1), neg_batch, dim=-1)
+        neg_tau = self.tau_min + (self.tau_max - self.tau_min) * neg_sim_scores
+        neg_sims = torch.exp(neg_sims / neg_tau)  # removed '-' in front of similarity
 
-        if neg_batch is not None:
-            # Embedding similarities between anchors and positive examples
-            neg_sims = F.cosine_similarity(anc_batch.unsqueeze(1), neg_batch, dim=-1)
-            # Adaptive temperatures
-            neg_tau = self.tau_min + (self.tau_max - self.tau_min) * (1-neg_sim_scores)
-            neg_sims = torch.exp(neg_sims / neg_tau)  # removed '-' in front of similarity
-
-            # Compute SNN loss with sampled negative examples
-            num = pos_sims.sum(dim=1)
-            den = torch.cat([pos_sims, neg_sims], dim=1).sum(dim=1)
-            snn = -torch.log(num / den)
-        else:
-            # Compute SNN loss with in-batch negative examples
-            num = pos_sims.sum(dim=1)
-            den = self._in_batch_negatives(anc_batch, lidars, gds, angles)
-            snn = -torch.log(num / (num + den))
+        # Compute SNN loss with sampled negative examples
+        num = pos_sims.sum(dim=1)
+        den = torch.cat([pos_sims, neg_sims], dim=1).sum(dim=1)
+        snn = -torch.log(num / den)
 
         return snn.mean()
-    
-    def _in_batch_negatives(self, anc_batch, lidars, gds, angles):
-        # In-batch distance scores
-        batch_scores = self._in_batch_scores(lidars, gds, angles)
-
-        # Embedding similarities between anchors and in-batch negative examples
-        batch_sims = F.cosine_similarity(anc_batch.unsqueeze(1), anc_batch.unsqueeze(0), dim=2)
-
-        # Mask out self-similarities
-        B = anc_batch.shape[0]
-        mask = ~torch.eye(B, device=anc_batch.device, dtype=torch.bool)
-        batch_sims = batch_sims[mask].view(B, B-1)
-        batch_scores = batch_scores[mask].view(B, B-1)
-
-        # Adaptive temperatures
-        batch_tau = self.tau_min + (self.tau_max - self.tau_min)*batch_scores
-        batch_sims = torch.exp(batch_sims / batch_tau)  # removed '-' in front of similarity
-
-        return batch_sims.sum(dim=1)
 
  
-class SNNSimCLR(SoftNearestNeighbor):
-    def __init__(self, args, tau_min: float=0.1, tau_max: float=1.0):
+class SNNSimCLR(nn.Module):
+    def __init__(self, tau_min: float=0.1, tau_max: float=1.0):
         """
         SNN objective based on SimCLR framework.
+        ----------
+        Parameters:
+            - tau_min: float - minimum adaptive temperature value
+            - tau_max: float - maximum adaptive temperature value
         """
-        super().__init__(
-            args=args,
-            tau_min=tau_min,
-            tau_max=tau_max
-        )
+        # Temperatures range
+        self.tau_min, self.tau_max = tau_min, tau_max
 
     def __call__(
             self,
             anc_batch: torch.Tensor, 
             pos_batch: torch.Tensor,
-            pos_sim_scores: torch.Tensor, 
-            lidars: torch.Tensor, 
-            gds: torch.Tensor, 
-            angles: torch.Tensor
+            tau_fn: Callable,
+            *args,
+            **kwargs
         ):
+        """
+        Parameters:
+            - anc_batch: torch.Tensor - anchor images
+            - pos_batch: torch.Tensor - positive examples
+            - tau_fn: Callable        - function for computing in-batch similarity scores
+            - *args, **kwargs         - `tau_fn` arguments
+        ----------
+        New implementation maps similarities/distances in [tau_min, tau_max]:
+
+                tau(i,j) = tau_min + (tau_max-tau_min) * d_ij/d_max 
+        """
 
         # Compute overall similarity matrix
         features = torch.cat([anc_batch, pos_batch], dim=0)        
@@ -216,7 +110,7 @@ class SNNSimCLR(SoftNearestNeighbor):
         neg_sims = sim_mat[neg_mask].view(N, -1)
 
         # In-batch negative scores
-        batch_tau = self._in_batch_scores(lidars, gds, angles)
+        batch_tau = tau_fn(*args, **kwargs)
         batch_tau_mat = batch_tau.repeat(2, 2)
         batch_tau_mat = batch_tau_mat[neg_mask].view(N, -1)
         batch_tau_mat = self.tau_min + (self.tau_max - self.tau_min)*batch_tau_mat
@@ -230,176 +124,3 @@ class SNNSimCLR(SoftNearestNeighbor):
         ce_labels = torch.zeros(N, dtype=torch.long, device=device)
         
         return F.cross_entropy(logits, ce_labels)
-
-
-class SNNEucledianDistanceLoss(SoftNearestNeighbor):
-    def __init__(self, args, tau_min: float=0.1, tau_max: float=1.0):
-        """
-        SNN objective based on Eucledian Distence between embeddings.
-        """
-        super().__init__(
-            args=args,
-            tau_min=tau_min,
-            tau_max=tau_max
-        )
-
-    def __call__(
-            self,
-            anc_batch: torch.Tensor, 
-            pos_batch: torch.Tensor,
-            pos_sim_scores: torch.Tensor, 
-            lidars: torch.Tensor=None, 
-            gds: torch.Tensor=None, 
-            angles: torch.Tensor=None,
-            neg_batch: torch.Tensor=None, 
-            neg_sim_scores: torch.Tensor=None
-        ):
-        """
-        New implementation maps similarities/distances in [tau_min, tau_max]:
-
-                tau(i,j) = tau_min + (tau_max-tau_min) * d_ij/d_max
-        ----------
-        IMPORTANT:
-        - positive examples use distances as adaptive temperatures 
-          (the closer the sample, the higher the numerator)
-        - negative examples use similarities as adaptive temperatures 
-          (the more similar, the less impact on the denominator) 
-        """
-        if torch.isnan(anc_batch).any() or torch.isnan(pos_batch).any():
-            print("FATAL: NaN detected in network outputs (anc_batch or pos_batch).")
-
-        # Embedding distances between anchors and positive examples
-        pos_dists = (anc_batch.unsqueeze(1) - pos_batch).pow(2).sum(dim=-1).sqrt()
-        pos_tau = self.tau_min + (self.tau_max - self.tau_min) * pos_sim_scores
-        pos_dists = -(pos_dists / pos_tau)
-
-        if neg_batch is not None:
-            # Embedding similarities between anchors and positive examples
-            neg_dists = (anc_batch.unsqueeze(1) - neg_batch).pow(2).sum(dim=-1).sqrt()
-            # Adaptive temperatures
-            neg_tau = self.tau_min + (self.tau_max - self.tau_min) * (1-neg_sim_scores)
-            neg_dists = -(neg_dists / neg_tau) 
-
-            # Compute SNN loss with sampled negative examples
-            num = pos_dists.sum(dim=1)
-
-            # Log-Sum-Exp Trick
-            den = torch.cat([pos_dists, neg_dists], dim=1)
-            max_den, _ = torch.max(den, dim=1, keepdim=True)
-            stable_den = den - max_den
-            stable_den = torch.log(torch.exp(stable_den).sum(dim=1)) + max_den.squeeze(1)
-
-            snn = -num + stable_den
-        else:
-            # Compute SNN loss with in-batch negative examples
-            num = pos_dists.sum(dim=1)
-
-            # Log-Sum-Exp Trick
-            neg_dists = self._in_batch_negatives(anc_batch, lidars, gds, angles)
-            den = torch.cat([pos_dists, neg_dists], dim=1)
-            max_den, _ = torch.max(den, dim=1, keepdim=True)
-            stable_den = den - max_den
-            stable_den = torch.log(torch.exp(stable_den).sum(dim=1)) + max_den.squeeze(1)
-
-            snn = -num + stable_den
-
-        return snn.mean()
-    
-    def _in_batch_negatives(self, anc_batch, lidars, gds, angles):
-        # In-batch distance scores
-        batch_scores = self._in_batch_scores(lidars, gds, angles)
-
-        # Embedding similarities between anchors and in-batch negative examples
-        batch_dists = (anc_batch.unsqueeze(1) - anc_batch.unsqueeze(0)).pow(2).sum(dim=-1).sqrt()
-
-        # Mask out self-similarities
-        B = anc_batch.shape[0]
-        mask = ~torch.eye(B, device=anc_batch.device, dtype=torch.bool)
-        batch_dists = batch_dists[mask].view(B, B-1)
-        batch_scores = batch_scores[mask].view(B, B-1)
-
-        # Adaptive temperatures
-        batch_tau = self.tau_min + (self.tau_max - self.tau_min) * batch_scores
-        batch_dists = -(batch_dists / batch_tau)
-
-        return batch_dists
-    
-
-class SNNManhattanDistanceLoss(SoftNearestNeighbor):
-    def __init__(self, args, tau_min: float=0.1, tau_max: float=1.0):
-        """
-        SNN objective based on Manhattan Distence between embeddings.
-        """
-        super().__init__(
-            args=args,
-            tau_min=tau_min,
-            tau_max=tau_max
-        )
-
-    def __call__(
-            self,
-            anc_batch: torch.Tensor, 
-            pos_batch: torch.Tensor,
-            pos_sim_scores: torch.Tensor, 
-            lidars: torch.Tensor=None, 
-            gds: torch.Tensor=None, 
-            angles: torch.Tensor=None,
-            neg_batch: torch.Tensor=None, 
-            neg_sim_scores: torch.Tensor=None
-        ):
-        """
-        New implementation maps similarities/distances in [tau_min, tau_max]:
-
-                tau(i,j) = tau_min + (tau_max-tau_min) * d_ij/d_max
-        ----------
-        IMPORTANT:
-        - positive examples use distances as adaptive temperatures 
-          (the closer the sample, the higher the numerator)
-        - negative examples use similarities as adaptive temperatures 
-          (the more similar, the less impact on the denominator) 
-        """
-        if torch.isnan(anc_batch).any() or torch.isnan(pos_batch).any():
-            print("FATAL: NaN detected in network outputs (anc_batch or pos_batch).") 
-
-        # Embedding distances between anchors and positive examples
-        pos_dists = torch.abs(anc_batch.unsqueeze(1) - pos_batch).sum(dim=-1)
-        pos_tau = self.tau_min + (self.tau_max - self.tau_min) * pos_sim_scores
-        pos_dists = torch.exp(-(pos_dists / pos_tau))
-
-        if neg_batch is not None:
-            # Embedding similarities between anchors and positive examples
-            neg_dists = torch.abs(anc_batch.unsqueeze(1) - neg_batch).sum(dim=-1)
-            # Adaptive temperatures
-            neg_tau = self.tau_min + (self.tau_max - self.tau_min) * (1-neg_sim_scores)
-            neg_dists = torch.exp(-(neg_dists / neg_tau)) 
-
-            # Compute SNN loss with sampled negative examples
-            num = pos_dists.sum(dim=1)
-            den = torch.cat([pos_dists, neg_dists], dim=1).sum(dim=1)
-            snn = -torch.log(num / den)
-        else:
-            # Compute SNN loss with in-batch negative examples
-            num = pos_dists.sum(dim=1)
-            den = self._in_batch_negatives(anc_batch, lidars, gds, angles)
-            snn = -torch.log(num / (num + den))
-
-        return snn.mean()
-    
-    def _in_batch_negatives(self, anc_batch, lidars, gds, angles):
-        # In-batch distance scores
-        batch_scores = self._in_batch_scores(lidars, gds, angles)
-
-        # Embedding similarities between anchors and in-batch negative examples
-        batch_dists = torch.abs(anc_batch.unsqueeze(1) - anc_batch.unsqueeze(0)).sum(dim=-1)
-
-        # Mask out self-similarities
-        B = anc_batch.shape[0]
-        mask = ~torch.eye(B, device=anc_batch.device, dtype=torch.bool)
-        batch_dists = batch_dists[mask].view(B, B-1)
-        batch_scores = batch_scores[mask].view(B, B-1)
-
-        # Adaptive temperatures
-        batch_tau = self.tau_min + (self.tau_max - self.tau_min) * batch_scores
-        batch_dists = torch.exp(-(batch_dists / batch_tau))
-        
-        return batch_dists.sum(dim=1)

@@ -10,7 +10,7 @@ from torch.distributed import init_process_group, destroy_process_group
 
 # Contrastive imports
 from trainer import SingleGPUTrainer, MultiGPUTrainer
-from contrastive.datasets import RoomAllAgentsDataset
+from contrastive.datasets import ContrastiveDataset, RoomAllAgentsDataset, AirSimDataset
 from contrastive.encoder import ResNetEncoder, MobileNetV3Encoder
 MODEL = {
     'resnet50': ResNetEncoder,
@@ -18,7 +18,6 @@ MODEL = {
 }
 from contrastive.components import SNNCosineSimilarityLoss, SNNSimCLR
 LOSS_FN = {
-    'classic': SNNCosineSimilarityLoss,
     'scene-transfer': SNNCosineSimilarityLoss,
     'simclr': SNNSimCLR
 }
@@ -26,8 +25,6 @@ LOSS_FN = {
 # Utils
 import os
 import traceback
-import numpy as np
-from multiprocessing import shared_memory
 from datetime import datetime
 from configurations import Configurations
 
@@ -52,7 +49,7 @@ def ddp_setup(rank: int, world_size: int):
     print(f'[GPU:{rank}] DDP successfully set up!')
 
 
-def get_dataset(args) -> tuple[RoomAllAgentsDataset]:
+def get_dataset(args) -> tuple[ContrastiveDataset]:
     transforms = v2.Compose([
         v2.ToImage(),
         v2.ToDtype(torch.uint8, scale=True),
@@ -61,60 +58,67 @@ def get_dataset(args) -> tuple[RoomAllAgentsDataset]:
         v2.ToDtype(torch.float32, scale=True),
         v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
-
-    # Augmentations for positive examples
-    augmentations = [
-        # Brighter 
-        v2.Compose([
-            v2.ToImage(),
-            v2.ToDtype(torch.uint8, scale=True),
-            v2.Resize([232,232]),
-            v2.CenterCrop([224,224]),
-            v2.ColorJitter(brightness=(1.5,2.0)),
-            v2.ToDtype(torch.float32, scale=True),
-            v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ]),  
-    ]
     
-    # Training dataset
-    train_dataset = RoomAllAgentsDataset(
-        dir=f'{args.datasets_path}/{args.dataset}',
-        algo=args.algo,
-        val_room=args.val_room,
-        metric=args.metric,
-        mask=args.mask,
-        shift = args.shift,
-        n_pos=args.n_pos,
-        pos_thresh=args.pos_thresh,
-        n_neg=args.n_neg,
-        neg_thresh=args.neg_thresh,
-        batch_size=args.batch_size,
-        micro_bsize=args.micro_bsize,
-        transforms=transforms,
-        augmentations=augmentations,
-        mode='train',
-        multi_gpu=args.multi_gpu
-    )
+    if args.dataset == 'Room_all_agents':
+        # Training dataset
+        train_dataset = RoomAllAgentsDataset(
+            dir=os.path.join(rf'{args.datasets_path}', rf'{args.dataset}'),
+            algo=args.algo,
+            val_room=args.val_room,
+            metric=args.metric,
+            mask=args.mask,
+            shift=args.shift,
+            n_pos=args.n_pos,
+            pos_thresh=args.pos_thresh,
+            n_neg=args.n_neg,
+            neg_thresh=args.neg_thresh,
+            batch_size=args.batch_size,
+            micro_bsize=args.micro_bsize,
+            transforms=transforms,
+            mode='train',
+            multi_gpu=args.multi_gpu
+        )
 
-    # Validation dataset
-    val_dataset = RoomAllAgentsDataset(
-        dir=f'{args.datasets_path}/{args.dataset}',
-        algo=args.algo,
-        val_room=args.val_room,
-        metric=args.metric,
-        mask=args.mask,
-        shift = args.shift,
-        n_pos=args.n_pos,
-        pos_thresh=args.pos_thresh,
-        n_neg=args.n_neg,
-        neg_thresh=args.neg_thresh,
-        batch_size=args.batch_size,
-        micro_bsize=args.micro_bsize,
-        transforms=transforms,
-        augmentations=augmentations,
-        mode='val',
-        multi_gpu=args.multi_gpu
-    )
+        # Validation dataset
+        val_dataset = RoomAllAgentsDataset(
+            dir=os.path.join(rf'{args.datasets_path}', rf'{args.dataset}'),
+            algo=args.algo,
+            val_room=args.val_room,
+            metric=args.metric,
+            mask=args.mask,
+            shift=args.shift,
+            n_pos=args.n_pos,
+            pos_thresh=args.pos_thresh,
+            n_neg=args.n_neg,
+            neg_thresh=args.neg_thresh,
+            batch_size=args.batch_size,
+            micro_bsize=args.micro_bsize,
+            transforms=transforms,
+            mode='val',
+            multi_gpu=args.multi_gpu
+        )
+    else:
+        # Training dataset
+        train_dataset = AirSimDataset(
+            dir=os.path.join(rf'{args.datasets_path}', rf'{args.dataset}'),
+            batch_size=args.batch_size,
+            micro_bsize=args.micro_bsize,
+            transforms=transforms,
+            val_env=args.val_env,
+            mode='train',
+            multi_gpu=args.multi_gpu
+        )
+
+        # Validation dataset
+        val_dataset = AirSimDataset(
+            dir=os.path.join(rf'{args.datasets_path}', rf'{args.dataset}'),
+            batch_size=args.batch_size,
+            micro_bsize=args.micro_bsize,
+            transforms=transforms,
+            val_env=args.val_env,
+            mode='val',
+            multi_gpu=args.multi_gpu
+        )
 
     return train_dataset, val_dataset
 
@@ -126,7 +130,6 @@ def load_components(args):
     # Model, Loss and Optimizer
     model = MODEL[args.model]()
     loss_fn = LOSS_FN[args.algo](
-        args=args,
         tau_min=args.min_tau,
         tau_max=args.max_tau
     )
@@ -135,7 +138,7 @@ def load_components(args):
     return model, train_dataset, val_dataset, loss_fn, optimizer
 
 
-def main_single_gpu(args, exp_dir: str, figs_dir: str):
+def main_single_gpu(args, exp_dir: str):
     # Load training objects
     model, train_ds, val_ds, loss_fn, optimizer = load_components(args)
 
@@ -147,15 +150,14 @@ def main_single_gpu(args, exp_dir: str, figs_dir: str):
         val_ds=val_ds,
         loss_fn=loss_fn,
         optimizer=optimizer,
-        exp_dir=exp_dir,
-        figs_dir=figs_dir
+        exp_dir=exp_dir
     )
 
     # Train the model
     trainer.train()
 
 
-def main_multi_gpu(rank: int, world_size: int, exp_dir: str, figs_dir: str, args):
+def main_multi_gpu(rank: int, world_size: int, exp_dir: str, args):
     try:
         # Set up distributed training
         ddp_setup(rank=rank, world_size=world_size)
@@ -187,8 +189,7 @@ def main_multi_gpu(rank: int, world_size: int, exp_dir: str, figs_dir: str, args
             val_ds=val_ds,
             loss_fn=loss_fn,
             optimizer=optimizer,
-            exp_dir=exp_dir,
-            figs_dir=figs_dir
+            exp_dir=exp_dir
         )
 
         # Barrier synchronizazion
@@ -221,11 +222,10 @@ if __name__ == '__main__':
 
     print(f'{"-"*30}\nContrastive Scene Transfer Encoder training experiment! (Framework: {args.algo})')
 
-    # Create directories of the experiment
-    now = datetime.now().strftime('%d-%m-%Y_%H:%M:%S')
-    exp_dir = f"./experiments/{args.algo}/{now}"  
-    figs_dir = f'{exp_dir}/val_figs'
-    os.makedirs(figs_dir, exist_ok=True)
+    # Create directory of the experiment
+    now = datetime.now().strftime('%d-%m-%Y_%H-%M-%S')
+    exp_dir = rf'./experiments/{args.dataset}/{args.algo}/{now}'
+    os.makedirs(exp_dir, exist_ok=True)  
 
     # Save the configuration
     conf.save_yaml(dir=exp_dir)
@@ -240,11 +240,11 @@ if __name__ == '__main__':
         if world_size > 1:
             mp.spawn(
                 main_multi_gpu, 
-                args=(world_size, exp_dir, figs_dir, args),
+                args=(world_size, exp_dir, args),
                 nprocs=world_size
             )
         else:
             print(f'[WARN] Multi-GPU training requested, but only {world_size} found. Switching to single GPU training...')
-            main_single_gpu(args, exp_dir, figs_dir)
+            main_single_gpu(args, exp_dir)
     else:
-        main_single_gpu(args, exp_dir, figs_dir)
+        main_single_gpu(args, exp_dir)
